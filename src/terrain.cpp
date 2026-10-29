@@ -324,14 +324,15 @@ void terrainUpdateRoad(float carX, float carZ, float carYaw, float speed, float 
         s_nextJuncAt = s_along + 200.f + hashf(s_seed + (int)s_along) * 180.f;
     }
     if (!s_junc.active) return;
-    float dx = s_junc.x - carX, dz = s_junc.z - carZ;
-    float d = sqrtf(dx * dx + dz * dz);
+    // Junction-relative vector (use distinct names from the ribbon delta above).
+    float jdx = s_junc.x - carX, jdz = s_junc.z - carZ;
+    float d = sqrtf(jdx * jdx + jdz * jdz);
     if (d > 90.f) {
-        float fwd = dx * cosf(carYaw) + dz * sinf(carYaw);
+        float fwd = jdx * cosf(carYaw) + jdz * sinf(carYaw);
         if (fwd < -5.f) { s_junc.active = false; s_signN = 0; }
     }
     if (!s_committed && d < 18.f) {
-        float side = -dx * sinf(s_junc.yaw) + dz * cosf(s_junc.yaw);
+        float side = -jdx * sinf(s_junc.yaw) + jdz * cosf(s_junc.yaw);
         float headingDiff = carYaw - s_junc.yaw;
         while (headingDiff > 3.14f) headingDiff -= 6.28f;
         while (headingDiff < -3.14f) headingDiff += 6.28f;
