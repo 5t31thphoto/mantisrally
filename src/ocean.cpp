@@ -95,7 +95,7 @@ void oceanBlock(Bus& b, int n, const Scene& s) {
         if (load > 0.45f && s_rpm > 2800.f) {
             float tw = (load - 0.45f) * clampf((s_rpm - 2800.f) / 3000.f, 0.f, 1.f);
             eng += sinf(s_phase[4] * kTau * 1.7f) * tw * 0.06f;
-            eng += (rng.f() * 2.f - 1.f) * tw * 0.025f;
+            eng += rng.bi() * tw * 0.025f;
         }
         eng = softsat(eng);
 
@@ -103,12 +103,12 @@ void oceanBlock(Bus& b, int n, const Scene& s) {
         float pop = 0.f;
         if (s_popT > 0.f) {
             s_popT -= 1.f / (float)AUDIO_SR;
-            if ((rng.u32() & 0x3f) == 0)
-                pop = (rng.f() * 2.f - 0.5f) * 0.55f * clampf(s_popT * 6.f, 0.f, 1.f);
+            if ((rng.next() & 0x3f) == 0)
+                pop = (rng.bi() * 0.75f + 0.25f) * 0.55f * clampf(s_popT * 6.f, 0.f, 1.f);
         }
 
         // tire screech / gravel
-        float nse = rng.f() * 2.f - 1.f;
+        float nse = rng.bi();
         float gravel = nse * (0.03f + rough * 0.10f) * clampf(speed / 22.f, 0.f, 1.f);
         float screech = 0.f;
         if (s_screech > 0.08f) {
