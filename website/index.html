@@ -55,13 +55,24 @@
   }
   .flash p { margin: 0 0 1em; color: var(--ink-dim); font-size: 0.95rem; }
   esp-web-install-button { display: block; }
-  esp-web-install-button button, .install-fallback {
+  esp-web-install-button button, .install-fallback, a.bin-dl {
     font-family: "Bricolage Grotesque", sans-serif; font-weight: 800; font-size: 1.05rem;
     background: var(--accent); color: #1a0f08; border: none; border-radius: 999px;
     padding: 0.75em 1.4em; cursor: pointer; width: 100%;
+    display: block; text-align: center; text-decoration: none; box-sizing: border-box;
   }
-  esp-web-install-button button:hover, .install-fallback:hover { filter: brightness(1.08); }
+  esp-web-install-button button:hover, .install-fallback:hover, a.bin-dl:hover { filter: brightness(1.08); }
+  a.bin-dl {
+    background: transparent; color: var(--line);
+    border: 1px solid rgba(242, 230, 200, 0.35); margin-top: 0.75em;
+  }
+  a.bin-dl:hover { border-color: var(--accent); color: var(--accent); filter: none; }
+  .flash .or {
+    text-align: center; color: var(--ink-dim); font-size: 0.8rem;
+    margin: 0.85em 0 0; letter-spacing: 0.06em; text-transform: uppercase;
+  }
   .unsupported { color: var(--ink-dim); font-size: 0.9rem; margin-top: 0.8em; }
+  .flash code { font-size: 0.85em; color: var(--accent); }
   section { margin: 4.5em 0; }
   h2 {
     font-family: "Bricolage Grotesque", sans-serif; font-weight: 800;
@@ -101,14 +112,18 @@
     </p>
     <div class="flash">
       <h2>Flash to Core2</h2>
-      <p>Chrome or Edge, USB cable, hold the device in download mode if needed. Same web installer pattern as Planet and Seadiver.</p>
+      <p>Chrome or Edge, USB cable. Same web installer as Planet and Seadiver. CI writes the merged image after every build.</p>
       <esp-web-install-button manifest="./firmware/manifest.json">
         <button slot="activate">Install Mantis Rally</button>
         <span slot="unsupported" class="unsupported">
           Web flasher needs Chrome / Edge on desktop with WebSerial.
-          Or flash <code>firmware/firmware-merged.bin</code> with esptool at offset 0.
         </span>
       </esp-web-install-button>
+      <p class="or">or</p>
+      <a class="bin-dl" href="./firmware/firmware-merged.bin" download="mantis-rally-firmware-merged.bin">Download merged .bin</a>
+      <p class="unsupported" style="margin-top:0.9em">
+        Manual flash: <code>esptool.py --chip esp32 write_flash 0x0 firmware-merged.bin</code>
+      </p>
     </div>
   </div>
 
