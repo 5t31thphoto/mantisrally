@@ -137,15 +137,14 @@ float fieldMove(float& x, float& y, float& z, float& yaw,
     float nx = x + dx, nz = z + dz;
     float ny = ts.height + 0.35f;
 
-    // Soft bank wall: leaving the road costs grip (already in terrain) and a push back
+    // Soft verge: grip already drops off-road; do NOT zero speed (that made the car die).
     float hit = 0.f;
-    if (fabsf(ts.across) > ts.roadHalf + ts.bankL * 0.85f) {
-        // ditch / cliff soft stop
-        float push = (fabsf(ts.across) - ts.roadHalf - ts.bankL * 0.5f) * 0.08f;
-        hit = fmaxf(hit, clampf(push, 0.f, 0.7f));
-        // slide along rather than hard stop
-        nx = x + dx * 0.4f;
-        nz = z + dz * 0.4f;
+    if (fabsf(ts.across) > ts.roadHalf + ts.bankL * 0.95f) {
+        float push = (fabsf(ts.across) - ts.roadHalf - ts.bankL * 0.5f) * 0.04f;
+        hit = fmaxf(hit, clampf(push, 0.f, 0.25f));
+        // mild scrub only
+        nx = x + dx * 0.92f;
+        nz = z + dz * 0.92f;
     }
 
     for (int i = 0; i < FIELD_N; i++) {
@@ -172,7 +171,7 @@ float fieldMove(float& x, float& y, float& z, float& yaw,
     }
     if (bump) *bump = hit;
 
-    float frac = 1.f - hit * 0.5f;
+    float frac = 1.f - hit * 0.25f;
     x = x + (nx - x);
     z = z + (nz - z);
     // re-sample height at final pos

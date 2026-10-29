@@ -21,11 +21,11 @@
 // ======================= DRIFT PHYSICS TUNING =======================
 static constexpr float MASS          = 1.0f;
 static constexpr float MAX_SPEED     = 48.f;     // m/s ~173 km/h
-static constexpr float ENGINE_FORCE  = 38.f;     // accel at full throttle
+static constexpr float ENGINE_FORCE  = 62.f;     // accel at full throttle
 static constexpr float BRAKE_FORCE   = 52.f;
-static constexpr float DRAG          = 0.012f;
-static constexpr float ROLL_RES      = 0.8f;
-static constexpr float STEER_GAIN    = 2.4f;     // yaw response vs steer*speed
+static constexpr float DRAG          = 0.008f;
+static constexpr float ROLL_RES      = 0.22f;
+static constexpr float STEER_GAIN    = 3.8f;     // yaw response vs steer*speed
 static constexpr float GRIP_LAT      = 14.f;     // lateral tire force scale
 static constexpr float GRIP_LONG     = 11.f;
 static constexpr float HB_REAR_CUT   = 0.22f;    // handbrake rear grip multiplier
@@ -214,7 +214,7 @@ void loop() {
     velZ = fwdZ * vLong + rightZ * vLat;
 
     // Yaw from steering + from slip (drift rotation)
-    float steerYaw = steer * STEER_GAIN * clampf(fabsf(vLong) / 12.f, 0.15f, 1.f) * gripAvg;
+    float steerYaw = steer * STEER_GAIN * clampf(fabsf(vLong) / 10.f, 0.55f, 1.f) * fmaxf(gripAvg, 0.35f);
     // Counter-steer / oversteer: when slipping, yaw rate follows slip
     float driftYaw = slipAngle * 1.8f * clampf(fabsf(vLong) / 15.f, 0.f, 1.f);
     if (hb) driftYaw *= 1.6f;
@@ -227,9 +227,9 @@ void loop() {
     float bump = 0.f, g = grip;
     float frac = fieldMove(carX, carY, carZ, carYaw, dx, 0.f, dz, yawRate * dt, &bump, &g);
     grip = g;
-    if (frac < 0.95f) {
-        // kill velocity into the obstacle
-        velX *= frac; velZ *= frac;
+    if (frac < 0.9f) {
+        velX *= 0.5f + 0.5f * frac;
+        velZ *= 0.5f + 0.5f * frac;
     }
 
     slipAmt = clampf(fabsf(slipAngle) * 1.4f + (hb ? 0.35f : 0.f), 0.f, 1.f);

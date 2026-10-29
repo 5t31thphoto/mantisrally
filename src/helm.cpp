@@ -9,16 +9,16 @@
 namespace mantis {
 
 // ======================= TUNING =======================
-constexpr float STEER_DEADZONE_DEG = 2.0f;
-constexpr float STEER_FULL_DEG     = 18.f;
-constexpr float THROTTLE_DEAD_DEG  = 3.f;     // tip less than this: neutral (hold speed decay)
-constexpr float THROTTLE_FULL_DEG  = 20.f;
+constexpr float STEER_DEADZONE_DEG = 1.2f;
+constexpr float STEER_FULL_DEG     = 14.f;
+constexpr float THROTTLE_DEAD_DEG  = 1.5f;    // tip less than this: neutral
+constexpr float THROTTLE_FULL_DEG  = 15.f;
 constexpr float STICK_EXPO         = 0.45f;
 constexpr bool  INVERT_STEER       = false;
 constexpr bool  INVERT_THROTTLE    = false;  // false: tip top away = gas
-constexpr float TURN_RATE          = 2.15f;  // rad/s at full stick
+constexpr float TURN_RATE          = 2.6f;   // rad/s at full stick
 constexpr float ATTITUDE_MASS      = 0.10f;
-constexpr float STICK_SMOOTH       = 0.05f;
+constexpr float STICK_SMOOTH       = 0.035f;
 constexpr float MAX_CAM_PITCH      = 0.22f;
 constexpr float LEVEL_TIME         = 0.25f;
 constexpr float SLIDE_YAW          = 0.012f;
@@ -119,9 +119,9 @@ void helmUpdate(float dt, bool driving, HelmEvents& ev) {
     auto stick = [](float deg, float dead, float full) {
         float a = fabsf(deg);
         if (a < dead) return 0.f;
-        float t = clampf((a - dead) / (full - dead), 0.f, 1.f);
-        float e = t * t * (3.f - 2.f * t);
-        e = e * (1.f - STICK_EXPO) + e * e * STICK_EXPO;
+        float u = clampf((a - dead) / full, 0.f, 1.25f);
+        float e = u * (1.f - STICK_EXPO) + u * u * STICK_EXPO;
+        if (e > 1.f) e = 1.f;
         return (deg < 0.f ? -1.f : 1.f) * e;
     };
 

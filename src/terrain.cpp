@@ -25,6 +25,8 @@ static float s_along = 0.f;
 static float s_nextJuncAt = 160.f;
 static bool s_committed = false, s_tookLeft = false;
 static float s_branchMix = 0.f, s_branchYaw = 0.f;
+// continuous road ribbon pose (centerline under / ahead of the car)
+static float s_cx = 0.f, s_cz = 0.f, s_cyaw = 0.f;
 
 static inline float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b : v); }
 static inline float smoothstep(float a, float b, float x) {
@@ -34,17 +36,13 @@ static inline float smoothstep(float a, float b, float x) {
 
 // ---- road centreline in world XZ (snaking + branch bias) ----
 static void roadFrame(float x, float z, float& along, float& across, float& yaw) {
-    // low-freq heading field
-    float n = fbm2(x * 0.003f, z * 0.003f, 4, s_seed + 3);
-    yaw = (n - 0.5f) * 2.6f + s_branchYaw * s_branchMix;
-    // tighter curves for interest
-    float n2 = fbm2(x * 0.009f, z * 0.009f, 2, s_seed + 5);
-    yaw += (n2 - 0.5f) * 0.9f;
-    float cx = cosf(yaw), cz = sinf(yaw);
-    along = x * cx + z * cz;
-    // lateral: project onto perpendicular + a soft offset so the ribbon wanders
-    float off = (fbm2(x * 0.004f, z * 0.004f, 2, s_seed + 7) - 0.5f) * 10.f;
-    across = -x * cz + z * cx + off;
+    // Project onto the continuous ribbon pose (kept near the car by terrainUpdateRoad).
+    // Old noise-projection put the car permanently "off road" and fieldMove killed speed.
+    yaw = s_cyaw + s_branchYaw * s_branchMix;
+    float dx = x - s_cx, dz = z - s_cz;
+    float c = cosf(yaw), s = sinf(yaw);
+    along = dx * c + dz * s + s_along;
+    across = -dx * s + dz * c;
 }
 
 // Biome height character
@@ -184,6 +182,7 @@ void terrainInit(uint32_t seed) {
     s_jobPos = TG_N;
     memset(&s_junc, 0, sizeof(s_junc));
     s_signN = 0; s_along = 0.f;
+    s_cx = 0.f; s_cz = 0.f; s_cyaw = 0.f;
     s_nextJuncAt = 140.f + hashf(s_seed) * 100.f;
     s_committed = false; s_branchMix = 0.f; s_branchYaw = 0.f;
 }
@@ -272,8 +271,32 @@ static void spawnJunction(float carX, float carZ, float carYaw) {
 }
 
 void terrainUpdateRoad(float carX, float carZ, float carYaw, float speed, float dt) {
-    s_along += speed * dt;
-    s_px = carX; s_pz = carZ; s_D = s_along;
+    s_px = carX; s_pz = carZ;
+    // Advance ribbon along its own heading; curvature from distance noise.
+    float c = cosf(s_cyaw), s = sinf(s_cyaw);
+    float dx = carX - s_cx, dz = carZ - s_cz;
+    float lat = -dx * s + dz * c;
+    float forward = speed * dt;
+    // If the car is roughly on the ribbon, pay out centerline at car speed.
+    // If far off, still creep so the world keeps generating, but slower.
+    float pay = (fabsf(lat) < 14.f) ? forward : forward * 0.35f;
+    float curv = (fbm2(s_along * 0.012f, 2.7f, 3, s_seed + 3) - 0.5f) * 0.06f;
+    // gentle pull of ribbon yaw toward car heading when on-road so forks feel natural
+    if (fabsf(lat) < 8.f && speed > 2.f) {
+        float dy = carYaw - s_cyaw;
+        while (dy > 3.14159f) dy -= 6.28318f;
+        while (dy < -3.14159f) dy += 6.28318f;
+        s_cyaw += dy * 0.15f * dt;
+    }
+    s_cyaw += curv * pay;
+    s_cx += cosf(s_cyaw) * pay;
+    s_cz += sinf(s_cyaw) * pay;
+    s_along += pay;
+    s_D = s_along;
+    // recovery if completely lost
+    if (fabsf(lat) > 55.f) {
+        s_cx = carX; s_cz = carZ; s_cyaw = carYaw;
+    }
 
     // scroll height grid (Seadiver budgeted rows/cols)
     int wx = (int)floorf(carX / TG_CELL) - TG_N / 2;
