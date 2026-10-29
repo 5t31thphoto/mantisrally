@@ -130,7 +130,7 @@ void setup() {
     mantis::audioBegin();
     hx::begin();
 
-    TrackSample ts = mantis::terrainAt(0.f, 0.f);
+    mantis::TrackSample ts = mantis::terrainAt(0.f, 0.f);
     carY = ts.height + 0.4f;
     snprintf(bannerBuf, sizeof(bannerBuf), "%s", mantis::journeyBiome(mantis::journeyCurrent()).name);
     bannerText = bannerBuf;

@@ -1,5 +1,6 @@
 // Stage score — builds with cruise, shifts colour by biome, kicks on big slip.
 #include <math.h>
+#include "audio.h"
 #include "audio_int.h"
 #include "scene.h"
 #include "universe.h"
