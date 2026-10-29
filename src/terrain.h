@@ -44,6 +44,8 @@ void terrainSetBiome(uint8_t cur, uint8_t next, float blend);
 void terrainUpdateRoad(float carX, float carZ, float carYaw, float speed, float dt);
 
 TrackSample terrainAt(float x, float z);
+// Move an off-road position back to the nearest road edge while preserving its along-road progress.
+void terrainRecoverRoad(float& x, float& z);
 float terrainHeight(float x, float z);
 void  terrainDirection(float x, float z, float& dirX, float& dirZ, float& curvature);
 

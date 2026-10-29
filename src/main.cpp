@@ -41,6 +41,8 @@ static float slipAmt = 0.f;              // 0..1 for FX
 static float distanceTravelled = 0.f;
 static float stageTime = 0.f;
 static bool wasBumped = false;
+static float offRoadTimer = 0.f;
+static bool offRoadActive = false;
 static float fpsAvg = 30.f;
 static float bannerT = 0.f;
 static const char* bannerText = nullptr;
@@ -167,6 +169,13 @@ void loop() {
     float grip = ts.grip;
     float slope = ts.slope;
     float camber = ts.camber;
+    const float offRoadDistance = fabsf(ts.across) - ts.roadHalf;
+    const bool offRoadNow = offRoadDistance > 0.35f;
+    // Keep full 3-D movement available, but loose ground costs grip and speed.
+    if (offRoadNow) {
+        const float severity = clampf(offRoadDistance / 9.f, 0.f, 1.f);
+        grip *= 0.62f - 0.18f * severity;
+    }
 
     float throttle = helmThrottle();
     float brake = helmBrake();
@@ -232,6 +241,41 @@ void loop() {
         velZ *= 0.5f + 0.5f * frac;
     }
 
+    // Off-road recovery is deliberately forgiving: the car can cut corners and
+    // drive freely in 3-D, but rough ground scrubs speed and starts a 3-second clock.
+    TrackSample afterMove = terrainAt(carX, carZ);
+    const float afterOffRoadDistance = fabsf(afterMove.across) - afterMove.roadHalf;
+    offRoadActive = afterOffRoadDistance > 0.35f;
+    if (offRoadActive) {
+        offRoadTimer += dt;
+        const float severity = clampf(afterOffRoadDistance / 9.f, 0.f, 1.f);
+        const float scrub = 0.10f + 0.12f * severity;
+        const float damp = fmaxf(0.f, 1.f - scrub * dt);
+        velX *= damp;
+        velZ *= damp;
+        // Off-road rumble is mixed into the normal haptic level below.
+        (void)severity;
+        if (offRoadTimer >= 3.0f) {
+            terrainRecoverRoad(carX, carZ);
+            carY = terrainHeight(carX, carZ) + 0.35f;
+            // A recovery is a reset, not a crash: preserve some momentum but make
+            // the return to the road noticeable and controllable.
+            velX *= 0.62f;
+            velZ *= 0.62f;
+            offRoadTimer = 0.f;
+            offRoadActive = false;
+            wasBumped = false;
+            hx::bump(0.35f);
+            sfxBump(0.28f);
+            snprintf(bannerBuf, sizeof(bannerBuf), "BACK ON ROAD");
+            bannerText = bannerBuf;
+            bannerT = 1.4f;
+        }
+    } else {
+        offRoadTimer = 0.f;
+        offRoadActive = false;
+    }
+
     slipAmt = clampf(fabsf(slipAngle) * 1.4f + (hb ? 0.35f : 0.f), 0.f, 1.f);
 
     if (bump > 0.12f && !wasBumped) {
@@ -243,7 +287,7 @@ void loop() {
     } else if (bump < 0.05f) wasBumped = false;
 
     hx::engine(throttle, fabsf(carSpeed));
-    hx::rumble(ts.roughness * 0.45f + slipAmt * 0.85f + (hb ? 0.25f : 0.f));
+    hx::rumble(fmaxf(ts.roughness * 0.45f + slipAmt * 0.85f + (hb ? 0.25f : 0.f), offRoadActive ? 0.42f + 0.30f * clampf(afterOffRoadDistance / 9.f, 0.f, 1.f) : 0.f));
 
     distanceTravelled += sqrtf(dx * dx + dz * dz);
     stageTime += dt;
@@ -279,6 +323,12 @@ void loop() {
     g_hud.scanT = scanT;
     g_hud.banner = bannerT > 0.f ? bannerText : nullptr;
     g_hud.bannerA = bannerT > 0.f ? fminf(1.f, bannerT) : 0.f;
+    if (offRoadActive) {
+        const int remainTenths = (int)ceilf(fmaxf(0.f, 3.f - offRoadTimer) * 10.f);
+        snprintf(bannerBuf, sizeof(bannerBuf), "OFF ROAD - %d.%d", remainTenths / 10, remainTenths % 10);
+        g_hud.banner = bannerBuf;
+        g_hud.bannerA = 0.95f;
+    }
     if (bannerT > 0.f) bannerT -= dt;
     g_hud.showFps = false;
     g_hud.fps = (int)(fpsAvg + 0.5f);

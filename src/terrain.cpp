@@ -235,6 +235,18 @@ TrackSample terrainAt(float x, float z) {
 
 float terrainHeight(float x, float z) { return sampleGrid(x, z); }
 
+void terrainRecoverRoad(float& x, float& z) {
+    float along, across, yaw;
+    roadFrame(x, z, along, across, yaw);
+    // Recover to the nearest edge, not the centre: shortcuts remain possible and
+    // the driver can immediately steer back onto the road.
+    const float targetAcross = (across < 0.f ? -1.f : 1.f) * 4.4f;
+    const float shift = targetAcross - across;
+    x += -sinf(yaw) * shift;
+    z +=  cosf(yaw) * shift;
+    (void)along;
+}
+
 void terrainDirection(float x, float z, float& dirX, float& dirZ, float& curvature) {
     float along, across, yaw;
     roadFrame(x, z, along, across, yaw);
