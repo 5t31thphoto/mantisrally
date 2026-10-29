@@ -367,7 +367,7 @@ static void drawRoad() {
 
             uint32_t hh = hash32((uint32_t)(wx * 6.f) ^ (uint32_t)(wz * 4.f) ^ (uint32_t)zr);
             float grit = (hh & 255) / 255.f;
-            float n = fbm2(wx * 0.1f, wz * 0.1f, 2, worldSeed() + 9);
+            float n = vnoise2(wx * 0.1f, wz * 0.1f, worldSeed() + 9);
 
             uint8_t base;
             int shade;
@@ -511,7 +511,6 @@ static void drawProps() {
         for (int i = 0; i < FIELD_N; i++) {
             if (!o[i].on) continue;
             int px, py; float d;
-            float h = o[i].type == OBJ_TREE ? o[i].b : o[i].a;
             if (!renderProject(o[i].x, o[i].y, o[i].z, px, py, d) || d > 75.f) continue;
             bool near = d < 28.f;
             if (pass == 0 && near) continue;

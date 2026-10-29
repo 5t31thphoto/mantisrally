@@ -14,6 +14,8 @@ static float    s_blend = 0.f;
 
 // height grid (metres * 10 stored as int16)
 static int16_t* s_h = nullptr;
+// One validity bit per cached height. A shifted strip is invalid until generated.
+static uint8_t s_valid[(TG_N * TG_N + 7) / 8] = {};
 static int s_ox = 0, s_oz = 0;
 static float s_px = 0.f, s_pz = 0.f, s_D = 0.f;
 static int s_jobAxis = -1, s_jobLine = 0, s_jobPos = TG_N;
@@ -42,8 +44,21 @@ static inline float roadHeadingSlope(float d) {
     const float phaseA = (float)(s_seed & 1023u) * 0.006135923f;
     const float phaseB = (float)((s_seed >> 10) & 1023u) * 0.006135923f;
     const float q = s_along + d;
-    return 0.34f * 0.0082f * cosf(q * 0.0082f + phaseA)
-         + 0.13f * 0.021f * cosf(q * 0.021f + phaseB);
+    float curvature = 0.34f * 0.0082f * cosf(q * 0.0082f + phaseA)
+                    + 0.13f * 0.021f * cosf(q * 0.021f + phaseB);
+
+    // One broad, seeded hairpin zone every few hundred metres. A half-sine
+    // curvature pulse enters and exits at zero curvature, so there are no
+    // steering discontinuities or expensive per-segment spline allocations.
+    const float section = floorf((q + 40.f) / 300.f);
+    const float u = (q + 40.f) - section * 300.f;
+    if (u >= 72.f && u <= 144.f) {
+        const float t = (u - 72.f) * (3.14159265f / 72.f);
+        const uint32_t key = s_seed ^ ((uint32_t)((int32_t)section) * 0x9E3779B9u);
+        const float direction = (hash32(key) & 1u) ? 1.f : -1.f;
+        curvature += direction * 0.052f * sinf(t);
+    }
+    return curvature;
 }
 static void roadFrame(float x, float z, float& along, float& across, float& yaw) {
     const float baseC = cosf(s_cyaw), baseS = sinf(s_cyaw);
@@ -92,7 +107,34 @@ static void biomeAmps(uint8_t id, float& hills, float& ridges, float& cliffs, fl
     }
 }
 
-static float applyRoadCut(float x, float z, float zH, float across) {
+// The road has its own low-frequency elevation profile. Keeping this separate
+// from mountain/cliff noise gives the tires a continuous surface while the
+// surrounding terrain can stay dramatic. Analytic derivatives are cheap enough
+// to use directly in the physics step.
+static inline float roadElevation(float along, float hills) {
+    const float phaseA = (float)(s_seed & 1023u) * 0.006135923f;
+    const float phaseB = (float)((s_seed >> 10) & 1023u) * 0.006135923f;
+    const float amp = 1.35f + hills * 0.045f;
+    return amp * sinf(along * 0.039f + phaseA)
+         + 0.48f * sinf(along * 0.087f + phaseB)
+         + 0.12f * sinf(along * 0.19f + phaseA * 1.7f);
+}
+static inline float roadElevationSlope(float along, float hills) {
+    const float phaseA = (float)(s_seed & 1023u) * 0.006135923f;
+    const float phaseB = (float)((s_seed >> 10) & 1023u) * 0.006135923f;
+    const float amp = 1.35f + hills * 0.045f;
+    return amp * 0.039f * cosf(along * 0.039f + phaseA)
+         + 0.48f * 0.087f * cosf(along * 0.087f + phaseB)
+         + 0.12f * 0.19f * cosf(along * 0.19f + phaseA * 1.7f);
+}
+
+static float applyRoadCut(float x, float z, float zH, float across, float along) {
+    (void)x; (void)z;
+    const float half = 5.5f;
+    const float absA = fabsf(across);
+    // Most terrain samples are off-road, especially the renderer's scenery rays.
+    // Reject them before biome blending/noise work.
+    if (absA >= half + 6.f) return zH;
     float hillsA, ridgesA, cliffsA, canyonA, roughA;
     float hillsB, ridgesB, cliffsB, canyonB, roughB;
     biomeAmps(s_cur, hillsA, ridgesA, cliffsA, canyonA, roughA);
@@ -100,27 +142,24 @@ static float applyRoadCut(float x, float z, float zH, float across) {
     const float hills = hillsA * (1.f - s_blend) + hillsB * s_blend;
     const float ridges = ridgesA * (1.f - s_blend) + ridgesB * s_blend;
     const float rough = roughA * (1.f - s_blend) + roughB * s_blend;
-    const float half = 5.5f;
-    const float absA = fabsf(across);
-    if (absA >= half + 6.f) return zH;
-
-    const float roadH = fbm2(x * 0.006f, z * 0.006f, 4, s_seed) * hills * 0.95f;
+    const float roadH = roadElevation(along, hills);
     float bank = 0.f;
     if (absA > half) {
         float t = (absA - half) / 6.f;
         bank = sinf(t * 3.14159f) * (2.0f + 1.4f * rough) * (1.f + ridges * 0.12f);
         if (t > 0.7f) bank -= (t - 0.7f) * 3.f;
     }
-    float blend = (1.f - smoothstep(half - 0.5f, half + 4.0f, absA)) * 0.82f;
-    float crown = absA <= half ? (1.f - (absA / half) * (absA / half)) * 0.15f : 0.f;
+    // Full-strength replacement across the driveable surface; only the verge
+    // blends back to natural terrain. No cliff/ridge noise leaks through the road.
+    float blend = 1.f - smoothstep(half - 0.35f, half + 4.0f, absA);
+    float crown = absA <= half ? (1.f - (absA / half) * (absA / half)) * 0.12f : 0.f;
     const float flat = roadH + crown + bank;
     return zH * (1.f - blend) + flat * blend;
 }
 
 static float terrainShapeInternal(float x, float z, float* acrossOut, bool cutRoad) {
-    float along, across, yaw;
-    roadFrame(x, z, along, across, yaw);
-    (void)along; (void)yaw;
+    float along = 0.f, across = 0.f, yaw = 0.f;
+    if (cutRoad || acrossOut) roadFrame(x, z, along, across, yaw);
     if (acrossOut) *acrossOut = across;
 
     float hillsA, ridgesA, cliffsA, canyonA, roughA;
@@ -166,7 +205,7 @@ static float terrainShapeInternal(float x, float z, float* acrossOut, bool cutRo
 
     // The height cache stores natural terrain only. Apply the moving road cut
     // at sample time so the curved ribbon cannot slide away from its own ground.
-    if (cutRoad) zH = applyRoadCut(x, z, zH, across);
+    if (cutRoad) zH = applyRoadCut(x, z, zH, across, along);
 
     return zH;
 }
@@ -175,15 +214,34 @@ float terrainShape(float x, float z, float* acrossOut) {
     return terrainShapeInternal(x, z, acrossOut, true);
 }
 
+static inline int cellIndex(int ix, int iz) {
+    return ((iz % TG_N + TG_N) % TG_N) * TG_N + (ix % TG_N + TG_N) % TG_N;
+}
+static inline bool cellValid(int idx) {
+    return (s_valid[idx >> 3] & (uint8_t)(1u << (idx & 7))) != 0;
+}
+static inline void setCellValid(int idx, bool valid) {
+    const uint8_t bit = (uint8_t)(1u << (idx & 7));
+    if (valid) s_valid[idx >> 3] |= bit;
+    else s_valid[idx >> 3] &= (uint8_t)~bit;
+}
+static void invalidateLine(int axis, int line, int start, int count) {
+    for (int k = 0; k < count; ++k) {
+        const int idx = axis == 0 ? cellIndex(line, start + k) : cellIndex(start + k, line);
+        setCellValid(idx, false);
+    }
+}
 static void dreamCell(int ix, int iz) {
     if (!s_h) return;
+    const int idx = cellIndex(ix, iz);
+    setCellValid(idx, false);
     float x = ix * TG_CELL, z = iz * TG_CELL;
     float h = terrainShapeInternal(x, z, nullptr, false);
-    int idx = (iz % TG_N + TG_N) % TG_N * TG_N + (ix % TG_N + TG_N) % TG_N;
     float d = h * 10.f;
     if (d > 32000.f) d = 32000.f;
     if (d < -32000.f) d = -32000.f;
     s_h[idx] = (int16_t)lroundf(d);
+    setCellValid(idx, true);
 }
 
 static float sampleGrid(float x, float z) {
@@ -193,18 +251,19 @@ static float sampleGrid(float x, float z) {
     // outside window → shape function
     if (ix < s_ox + 1 || iz < s_oz + 1 || ix + 2 >= s_ox + TG_N || iz + 2 >= s_oz + TG_N)
         return terrainShape(x, z, nullptr);
+    const int i00 = cellIndex(ix, iz), i10 = cellIndex(ix + 1, iz);
+    const int i01 = cellIndex(ix, iz + 1), i11 = cellIndex(ix + 1, iz + 1);
+    if (!cellValid(i00) || !cellValid(i10) || !cellValid(i01) || !cellValid(i11))
+        return terrainShape(x, z, nullptr);
     float fx = gx - ix, fz = gz - iz;
-    auto at = [&](int i, int j) -> float {
-        int idx = (j % TG_N + TG_N) % TG_N * TG_N + (i % TG_N + TG_N) % TG_N;
-        return s_h[idx] * 0.1f;
-    };
-    float a = at(ix, iz), b = at(ix + 1, iz), c = at(ix, iz + 1), d = at(ix + 1, iz + 1);
+    auto at = [&](int idx) -> float { return s_h[idx] * 0.1f; };
+    float a = at(i00), b = at(i10), c = at(i01), d = at(i11);
     float ab = a + (b - a) * fx, cd = c + (d - c) * fx;
     float natural = ab + (cd - ab) * fz;
     float along, across, yaw;
     roadFrame(x, z, along, across, yaw);
-    (void)along; (void)yaw;
-    return applyRoadCut(x, z, natural, across);
+    (void)yaw;
+    return applyRoadCut(x, z, natural, across, along);
 }
 
 void terrainInit(uint32_t seed) {
@@ -212,6 +271,7 @@ void terrainInit(uint32_t seed) {
     // The journey chooses the starting biome before terrainInit. Preserve that
     // selection so the initial height cache is generated with the right terrain.
     if (!s_h) s_h = (int16_t*)memFast(TG_N * TG_N * sizeof(int16_t));
+    memset(s_valid, 0, sizeof(s_valid));
     s_ox = -TG_N / 2; s_oz = -TG_N / 2;
     s_px = 0.f; s_pz = 0.f; s_D = 0.f;
     for (int j = 0; j < TG_N; j++)
@@ -249,15 +309,25 @@ TrackSample terrainAt(float x, float z) {
     t.roadHalf = 5.4f;
     t.height = sampleGrid(x, z);
 
-    // slope along road direction
-    float d = 1.5f;
-    float h1 = sampleGrid(x + cosf(yaw) * d, z + sinf(yaw) * d);
-    t.slope = (h1 - t.height) / d;
-
-    // camber from bank height difference left/right
-    float hL = sampleGrid(x - sinf(yaw) * 3.f, z + cosf(yaw) * 3.f);
-    float hR = sampleGrid(x + sinf(yaw) * 3.f, z - cosf(yaw) * 3.f);
-    t.camber = atanf((hR - hL) / 6.f);
+    // On the driveable surface, use the exact derivative of its smooth profile.
+    // This removes three expensive height queries (and their noise evaluations)
+    // from the common physics path. Off-road still samples the real terrain.
+    if (fabsf(across) < t.roadHalf - 0.25f) {
+        float hillsA, ridgesA, cliffsA, canyonA, roughA;
+        float hillsB, ridgesB, cliffsB, canyonB, roughB;
+        biomeAmps(s_cur, hillsA, ridgesA, cliffsA, canyonA, roughA);
+        biomeAmps(s_next, hillsB, ridgesB, cliffsB, canyonB, roughB);
+        const float hills = hillsA * (1.f - s_blend) + hillsB * s_blend;
+        t.slope = roadElevationSlope(along, hills);
+        t.camber = 0.f;
+    } else {
+        const float d = 1.5f;
+        float h1 = sampleGrid(x + cosf(yaw) * d, z + sinf(yaw) * d);
+        t.slope = (h1 - t.height) / d;
+        float hL = sampleGrid(x - sinf(yaw) * 3.f, z + cosf(yaw) * 3.f);
+        float hR = sampleGrid(x + sinf(yaw) * 3.f, z - cosf(yaw) * 3.f);
+        t.camber = atanf((hR - hL) / 6.f);
+    }
 
     t.curv = s_cRoadCurv;
 
@@ -377,6 +447,9 @@ void terrainUpdateRoad(float carX, float carZ, float carYaw, float speed, float 
             else if (s_oz < wz) { s_oz++; s_jobAxis = 1; s_jobLine = s_oz + TG_N - 1; }
             else if (s_oz > wz) { s_oz--; s_jobAxis = 1; s_jobLine = s_oz; }
             else break;
+            // Invalidate the entire newly exposed strip before incremental filling.
+            // Any query touching unfinished cells safely uses the analytic fallback.
+            invalidateLine(s_jobAxis, s_jobLine, s_jobAxis == 0 ? s_oz : s_ox, TG_N);
             s_jobPos = 0;
         }
         int n = TG_N - s_jobPos < budget ? TG_N - s_jobPos : budget;
