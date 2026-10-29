@@ -39,6 +39,7 @@ struct RoadSign {
 
 void terrainInit(uint32_t seed);
 void terrainSetBiome(uint8_t cur, uint8_t next, float blend);
+void terrainRefresh(); // rebuild cached heights after an explicit biome reset
 
 // Call each frame: scrolls the height grid, updates junctions
 void terrainUpdateRoad(float carX, float carZ, float carYaw, float speed, float dt);

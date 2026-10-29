@@ -7,12 +7,23 @@ Infinite branching rally / drift on M5Stack Core2. Same systems family as Mantis
 | Input | Action |
 |-------|--------|
 | Tip forward | Throttle |
-| Pull back | Brake |
+| Pull back | Brake (does not force reverse at a standstill) |
 | Tilt left / right | Steer |
-| Hold **C** | Handbrake (drift) |
-| **A** | Horn |
-| Long-press **A** | Mute |
-| Touch | Scan roadside object |
+| Drag on the touchscreen | Fine steering |
+| Tap a roadside object/sign | Scan it into the databank |
+| Hold the touchscreen | Toggle mute |
+| **A** | Horn / scare nearby spectators |
+| **B** | Re-centre the IMU steering neutral |
+| Hold **C** | Handbrake / initiate a drift |
+
+## Gameplay
+
+- Drive freely over the 3D heightfield. The road is a curved ribbon, not an invisible wall.
+- Cutting across rough ground costs grip and speed and produces controller rumble.
+- Staying off the road starts a visible three-second recovery timer. Re-enter the road to cancel it; when it expires, the car returns to the nearest road edge with reduced momentum.
+- Forks display left/right biome destinations. A committed fork bends the road toward the chosen branch, and that biome becomes the route target.
+- Sustained, fast slides bank drift points when the drift ends. The HUD shows speed, distance, current biome, grip, score, fork distance, scanning state, and off-road recovery.
+- The world is endless: biome progression, road forks, weather, day/night, props, scans, and drift scoring are the core loop rather than a separate race-finish screen.
 
 ## Build (local)
 
@@ -56,6 +67,11 @@ esptool.py --chip esp32 write_flash 0x0 firmware_merged.bin
 ## Host tools
 
 ```bash
+# gameplay regression checks (no PlatformIO required)
+g++ -O2 -DHOST -I src -I tools/host/stubs tools/host/gameplay_test.cpp \
+  src/universe.cpp src/journey.cpp src/terrain.cpp -lm -o /tmp/gameplay_test
+/tmp/gameplay_test
+
 # showcase stills
 g++ -O2 -DHOST -I src -I tools/host/stubs tools/host/snap_rally.cpp \
   src/universe.cpp src/journey.cpp src/terrain.cpp src/field.cpp \

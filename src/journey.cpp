@@ -53,6 +53,7 @@ void journeyInit(uint32_t seed) {
     s_distOnPath = 0.f;
     s_pathLen = 320.f + hashf(s_seed + 3) * 280.f;
     terrainSetBiome(s_cur, s_next, 0.f);
+    terrainRefresh();
 }
 
 void journeyCommitBranch(uint8_t destBiome) {
@@ -97,6 +98,7 @@ void journeyForceBiome(uint8_t cur, uint8_t next, float blend) {
     s_blend = blend < 0.f ? 0.f : (blend > 1.f ? 1.f : blend);
     s_distOnPath = s_blend * s_pathLen;
     terrainSetBiome(s_cur, s_next, s_blend);
+    terrainRefresh();
 }
 
 float journeyHeadingBias() { return s_headingBias; }

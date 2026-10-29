@@ -23,10 +23,10 @@ static RoadSign s_signs[6];
 static int s_signN = 0;
 static float s_along = 0.f;
 static float s_nextJuncAt = 160.f;
-static bool s_committed = false, s_tookLeft = false;
-static float s_branchMix = 0.f, s_branchYaw = 0.f;
+static bool s_committed = false, s_tookLeft = false, s_branchTaken = false;
+static float s_turnYawRemaining = 0.f, s_turnDistanceRemaining = 0.f;
 // continuous road ribbon pose (centerline under / ahead of the car)
-static float s_cx = 0.f, s_cz = 0.f, s_cyaw = 0.f;
+static float s_cx = 0.f, s_cz = 0.f, s_cyaw = 0.f, s_cRoadCurv = 0.f;
 
 static inline float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b : v); }
 static inline float smoothstep(float a, float b, float x) {
@@ -34,15 +34,36 @@ static inline float smoothstep(float a, float b, float x) {
     return t * t * (3.f - 2.f * t);
 }
 
-// ---- road centreline in world XZ (snaking + branch bias) ----
+// ---- Smooth, continuous road ribbon in world XZ ----
+// A low-amplitude heading field creates long sweepers. The local curve is
+// integrated relative to the current ribbon anchor so moving the anchor each
+// frame does not make the road jump sideways.
+static inline float roadHeadingSlope(float d) {
+    const float phaseA = (float)(s_seed & 1023u) * 0.006135923f;
+    const float phaseB = (float)((s_seed >> 10) & 1023u) * 0.006135923f;
+    const float q = s_along + d;
+    return 0.34f * 0.0082f * cosf(q * 0.0082f + phaseA)
+         + 0.13f * 0.021f * cosf(q * 0.021f + phaseB);
+}
 static void roadFrame(float x, float z, float& along, float& across, float& yaw) {
-    // Project onto the continuous ribbon pose (kept near the car by terrainUpdateRoad).
-    // Old noise-projection put the car permanently "off road" and fieldMove killed speed.
-    yaw = s_cyaw + s_branchYaw * s_branchMix;
+    const float baseC = cosf(s_cyaw), baseS = sinf(s_cyaw);
     float dx = x - s_cx, dz = z - s_cz;
-    float c = cosf(yaw), s = sinf(yaw);
-    along = dx * c + dz * s + s_along;
-    across = -dx * s + dz * c;
+    float d = dx * baseC + dz * baseS;
+    // The centerline is locally a circular arc. Two inexpensive projection
+    // passes are enough for the renderer's 70 m view and the off-road timer.
+    for (int i = 0; i < 2; ++i) {
+        float off = 0.5f * s_cRoadCurv * d * d;
+        float px = s_cx + baseC * d - baseS * off;
+        float pz = s_cz + baseS * d + baseC * off;
+        float localYaw = s_cyaw + s_cRoadCurv * d;
+        d += (x - px) * cosf(localYaw) + (z - pz) * sinf(localYaw);
+    }
+    float off = 0.5f * s_cRoadCurv * d * d;
+    float px = s_cx + baseC * d - baseS * off;
+    float pz = s_cz + baseS * d + baseC * off;
+    yaw = s_cyaw + s_cRoadCurv * d;
+    along = s_along + d;
+    across = -(x - px) * sinf(yaw) + (z - pz) * cosf(yaw);
 }
 
 // Biome height character
@@ -71,9 +92,35 @@ static void biomeAmps(uint8_t id, float& hills, float& ridges, float& cliffs, fl
     }
 }
 
-float terrainShape(float x, float z, float* acrossOut) {
+static float applyRoadCut(float x, float z, float zH, float across) {
+    float hillsA, ridgesA, cliffsA, canyonA, roughA;
+    float hillsB, ridgesB, cliffsB, canyonB, roughB;
+    biomeAmps(s_cur, hillsA, ridgesA, cliffsA, canyonA, roughA);
+    biomeAmps(s_next, hillsB, ridgesB, cliffsB, canyonB, roughB);
+    const float hills = hillsA * (1.f - s_blend) + hillsB * s_blend;
+    const float ridges = ridgesA * (1.f - s_blend) + ridgesB * s_blend;
+    const float rough = roughA * (1.f - s_blend) + roughB * s_blend;
+    const float half = 5.5f;
+    const float absA = fabsf(across);
+    if (absA >= half + 6.f) return zH;
+
+    const float roadH = fbm2(x * 0.006f, z * 0.006f, 4, s_seed) * hills * 0.95f;
+    float bank = 0.f;
+    if (absA > half) {
+        float t = (absA - half) / 6.f;
+        bank = sinf(t * 3.14159f) * (2.0f + 1.4f * rough) * (1.f + ridges * 0.12f);
+        if (t > 0.7f) bank -= (t - 0.7f) * 3.f;
+    }
+    float blend = (1.f - smoothstep(half - 0.5f, half + 4.0f, absA)) * 0.82f;
+    float crown = absA <= half ? (1.f - (absA / half) * (absA / half)) * 0.15f : 0.f;
+    const float flat = roadH + crown + bank;
+    return zH * (1.f - blend) + flat * blend;
+}
+
+static float terrainShapeInternal(float x, float z, float* acrossOut, bool cutRoad) {
     float along, across, yaw;
     roadFrame(x, z, along, across, yaw);
+    (void)along; (void)yaw;
     if (acrossOut) *acrossOut = across;
 
     float hillsA, ridgesA, cliffsA, canyonA, roughA;
@@ -117,36 +164,21 @@ float terrainShape(float x, float z, float* acrossOut) {
     // fine roughness
     zH += (fbm2(x * 0.08f, z * 0.08f, 2, s_seed + 0x70) - 0.5f) * rough;
 
-    // ---- road cut: flatten a corridor, raise banks ----
-    float half = 5.5f;
-    float absA = fabsf(across);
-    if (absA < half + 6.f) {
-        // target road height: smooth sample of hills along the centre
-        float roadH = fbm2(x * 0.006f, z * 0.006f, 4, s_seed) * hills * 0.95f;
-        // bank profile: ditch then berm
-        float bank = 0.f;
-        if (absA > half) {
-            float t = (absA - half) / 6.f; // 0 at edge .. 1 at 6m out
-            // rise up then fall (classic rally bank / spectator berm)
-            bank = sinf(t * 3.14159f) * (2.0f + 1.4f * rough) * (1.f + ridges * 0.12f);
-            // outer drop into wilderness
-            if (t > 0.7f) bank -= (t - 0.7f) * 3.f;
-        }
-        float blend = 1.f - smoothstep(half - 0.5f, half + 4.0f, absA);
-        blend *= 0.82f; // leave more natural undulation on the asphalt
-        // camber: slight crown on road
-        float crown = (1.f - (absA / half) * (absA / half)) * 0.15f;
-        if (absA > half) crown = 0.f;
-        float flat = roadH + crown + bank;
-        zH = zH * (1.f - blend) + flat * blend;
-    }
+    // The height cache stores natural terrain only. Apply the moving road cut
+    // at sample time so the curved ribbon cannot slide away from its own ground.
+    if (cutRoad) zH = applyRoadCut(x, z, zH, across);
 
     return zH;
 }
 
+float terrainShape(float x, float z, float* acrossOut) {
+    return terrainShapeInternal(x, z, acrossOut, true);
+}
+
 static void dreamCell(int ix, int iz) {
+    if (!s_h) return;
     float x = ix * TG_CELL, z = iz * TG_CELL;
-    float h = terrainShape(x, z, nullptr);
+    float h = terrainShapeInternal(x, z, nullptr, false);
     int idx = (iz % TG_N + TG_N) % TG_N * TG_N + (ix % TG_N + TG_N) % TG_N;
     float d = h * 10.f;
     if (d > 32000.f) d = 32000.f;
@@ -168,12 +200,17 @@ static float sampleGrid(float x, float z) {
     };
     float a = at(ix, iz), b = at(ix + 1, iz), c = at(ix, iz + 1), d = at(ix + 1, iz + 1);
     float ab = a + (b - a) * fx, cd = c + (d - c) * fx;
-    return ab + (cd - ab) * fz;
+    float natural = ab + (cd - ab) * fz;
+    float along, across, yaw;
+    roadFrame(x, z, along, across, yaw);
+    (void)along; (void)yaw;
+    return applyRoadCut(x, z, natural, across);
 }
 
 void terrainInit(uint32_t seed) {
     s_seed = seed ? seed : 1;
-    s_cur = 0; s_next = 1; s_blend = 0.f;
+    // The journey chooses the starting biome before terrainInit. Preserve that
+    // selection so the initial height cache is generated with the right terrain.
     if (!s_h) s_h = (int16_t*)memFast(TG_N * TG_N * sizeof(int16_t));
     s_ox = -TG_N / 2; s_oz = -TG_N / 2;
     s_px = 0.f; s_pz = 0.f; s_D = 0.f;
@@ -183,12 +220,21 @@ void terrainInit(uint32_t seed) {
     memset(&s_junc, 0, sizeof(s_junc));
     s_signN = 0; s_along = 0.f;
     s_cx = 0.f; s_cz = 0.f; s_cyaw = 0.f;
+    s_cRoadCurv = roadHeadingSlope(0.f);
     s_nextJuncAt = 140.f + hashf(s_seed) * 100.f;
-    s_committed = false; s_branchMix = 0.f; s_branchYaw = 0.f;
+    s_committed = false; s_branchTaken = false;
+    s_turnYawRemaining = s_turnDistanceRemaining = 0.f;
 }
 
 void terrainSetBiome(uint8_t cur, uint8_t next, float blend) {
     s_cur = cur % 17; s_next = next % 17; s_blend = clampf(blend, 0.f, 1.f);
+}
+
+void terrainRefresh() {
+    if (!s_h) return;
+    for (int j = 0; j < TG_N; ++j)
+        for (int i = 0; i < TG_N; ++i) dreamCell(s_ox + i, s_oz + j);
+    s_jobPos = TG_N;
 }
 
 static const uint8_t SURF[17] = {
@@ -213,8 +259,7 @@ TrackSample terrainAt(float x, float z) {
     float hR = sampleGrid(x + sinf(yaw) * 3.f, z - cosf(yaw) * 3.f);
     t.camber = atanf((hR - hL) / 6.f);
 
-    float curvN = fbm2(x * 0.01f, z * 0.01f, 2, s_seed + 19);
-    t.curv = (curvN - 0.5f) * 0.08f;
+    t.curv = s_cRoadCurv;
 
     uint8_t sa = SURF[s_cur], sb = SURF[s_next];
     t.surface = (s_blend < 0.5f) ? sa : sb;
@@ -222,8 +267,9 @@ TrackSample terrainAt(float x, float z) {
     float ga = GRIP0[sa] * journeyBiome(s_cur).gripBias;
     float gb = GRIP0[sb] * journeyBiome(s_next).gripBias;
     float g = ga * (1.f - s_blend) + gb * s_blend;
-    float edge = clampf((t.roadHalf + 2.f - fabsf(across)) / 3.f, 0.25f, 1.f);
-    // slope reduces grip a bit when climbing steep
+    // Grip fades gradually from asphalt to rough ground; it never vanishes.
+    float off = fmaxf(0.f, fabsf(across) - t.roadHalf);
+    float edge = 1.f - 0.58f * smoothstep(0.f, 10.f, off);
     g *= 1.f - clampf(fabsf(t.slope) * 0.15f, 0.f, 0.25f);
     t.grip = g * edge;
     t.roughness = (t.surface == 1 || t.surface == 2)
@@ -251,7 +297,7 @@ void terrainDirection(float x, float z, float& dirX, float& dirZ, float& curvatu
     float along, across, yaw;
     roadFrame(x, z, along, across, yaw);
     dirX = cosf(yaw); dirZ = sinf(yaw);
-    curvature = (fbm2(x * 0.01f, z * 0.01f, 2, s_seed + 19) - 0.5f) * 0.08f;
+    curvature = s_cRoadCurv;
     (void)along; (void)across;
 }
 
@@ -262,55 +308,65 @@ static uint8_t randomBiome(uint32_t salt) {
     return b;
 }
 
-static void spawnJunction(float carX, float carZ, float carYaw) {
-    float ax = cosf(carYaw), az = sinf(carYaw);
+static void spawnJunction() {
     float dist = 50.f + hashf(s_seed + (int)s_along) * 30.f;
+    float lateral = 0.5f * s_cRoadCurv * dist * dist;
+    float roadYaw = s_cyaw + s_cRoadCurv * dist;
+    float baseC = cosf(s_cyaw), baseS = sinf(s_cyaw);
+    float ax = cosf(roadYaw), az = sinf(roadYaw);
     s_junc.active = true;
-    s_junc.x = carX + ax * dist;
-    s_junc.z = carZ + az * dist;
-    s_junc.yaw = carYaw;
+    s_junc.x = s_cx + baseC * dist - baseS * lateral;
+    s_junc.z = s_cz + baseS * dist + baseC * lateral;
+    s_junc.yaw = roadYaw;
     s_junc.destL = randomBiome((uint32_t)(s_along * 3) + 11);
     s_junc.destR = randomBiome((uint32_t)(s_along * 5) + 29);
     if (s_junc.destR == s_junc.destL) s_junc.destR = (s_junc.destL + 4) % 17;
     s_junc.armL = -0.6f - hashf(s_seed + 41) * 0.3f;
     s_junc.armR =  0.6f + hashf(s_seed + 43) * 0.3f;
     s_junc.dist = dist;
-    s_committed = false; s_branchMix = 0.f;
+    s_committed = false; s_branchTaken = false;
     s_signN = 2;
-    float sx = cosf(carYaw + 1.57f), sz = sinf(carYaw + 1.57f);
-    s_signs[0] = {true, s_junc.x + sx * 5.f - ax * 8.f, s_junc.z + sz * 5.f - az * 8.f, carYaw, s_junc.destL, true};
-    s_signs[1] = {true, s_junc.x - sx * 5.f - ax * 8.f, s_junc.z - sz * 5.f - az * 8.f, carYaw, s_junc.destR, false};
+    float sx = cosf(roadYaw + 1.57f), sz = sinf(roadYaw + 1.57f);
+    s_signs[0] = {true, s_junc.x + sx * 5.f - ax * 8.f, s_junc.z + sz * 5.f - az * 8.f, roadYaw, s_junc.destL, true};
+    s_signs[1] = {true, s_junc.x - sx * 5.f - ax * 8.f, s_junc.z - sz * 5.f - az * 8.f, roadYaw, s_junc.destR, false};
 }
 
 void terrainUpdateRoad(float carX, float carZ, float carYaw, float speed, float dt) {
     s_px = carX; s_pz = carZ;
-    // Advance ribbon along its own heading; curvature from distance noise.
-    float c = cosf(s_cyaw), s = sinf(s_cyaw);
+    // The road is an independent curved ribbon. It does not rotate to follow
+    // the player: steering off-line is real, and the recovery timer handles it.
     float dx = carX - s_cx, dz = carZ - s_cz;
-    float lat = -dx * s + dz * c;
+    float c = cosf(s_cyaw), sn = sinf(s_cyaw);
+    float lat = -dx * sn + dz * c;
     float forward = speed * dt;
-    // If the car is roughly on the ribbon, pay out centerline at car speed.
-    // If far off, still creep so the world keeps generating, but slower.
     float pay = (fabsf(lat) < 14.f) ? forward : forward * 0.35f;
-    float curv = (fbm2(s_along * 0.012f, 2.7f, 3, s_seed + 3) - 0.5f) * 0.06f;
-    // gentle pull of ribbon yaw toward car heading when on-road so forks feel natural
-    if (fabsf(lat) < 8.f && speed > 2.f) {
-        float dy = carYaw - s_cyaw;
-        while (dy > 3.14159f) dy -= 6.28318f;
-        while (dy < -3.14159f) dy += 6.28318f;
-        s_cyaw += dy * 0.15f * dt;
-    }
-    s_cyaw += curv * pay;
-    s_cx += cosf(s_cyaw) * pay;
-    s_cz += sinf(s_cyaw) * pay;
-    s_along += pay;
-    s_D = s_along;
-    // recovery if completely lost
-    if (fabsf(lat) > 55.f) {
-        s_cx = carX; s_cz = carZ; s_cyaw = carYaw;
-    }
+    if (pay < 0.f) pay = 0.f;
 
-    // scroll height grid (Seadiver budgeted rows/cols)
+    // A selected fork bends the ribbon over 28 metres and then remains the road.
+    float turnStep = 0.f;
+    if (s_turnDistanceRemaining > 0.001f && pay > 0.f) {
+        float fraction = clampf(pay / s_turnDistanceRemaining, 0.f, 1.f);
+        turnStep = s_turnYawRemaining * fraction;
+        s_turnYawRemaining -= turnStep;
+        s_turnDistanceRemaining -= pay;
+        if (s_turnDistanceRemaining <= 0.001f) {
+            s_turnYawRemaining = 0.f;
+            s_turnDistanceRemaining = 0.f;
+        }
+    }
+    float baseCurv = roadHeadingSlope(0.f);
+    float curveStep = baseCurv * pay;
+    float turnCurv = (pay > 0.001f) ? turnStep / pay : 0.f;
+    float midYaw = s_cyaw + 0.5f * (turnStep + curveStep);
+    s_cx += cosf(midYaw) * pay;
+    s_cz += sinf(midYaw) * pay;
+    s_cyaw += turnStep + curveStep;
+    s_along += pay;
+    s_cRoadCurv = roadHeadingSlope(0.f) + turnCurv;
+    s_D = s_along;
+    // scroll height grid (Seadiver budgeted rows/cols). If the cache allocation
+    // failed, sampleGrid falls back to the procedural shape function.
+    if (s_h) {
     int wx = (int)floorf(carX / TG_CELL) - TG_N / 2;
     int wz = (int)floorf(carZ / TG_CELL) - TG_N / 2;
     int budget = 48;
@@ -330,9 +386,10 @@ void terrainUpdateRoad(float carX, float carZ, float carYaw, float speed, float 
         }
         budget -= n;
     }
+    }
 
     if (!s_junc.active && s_along > s_nextJuncAt) {
-        spawnJunction(carX, carZ, carYaw);
+        spawnJunction();
         s_nextJuncAt = s_along + 200.f + hashf(s_seed + (int)s_along) * 180.f;
     }
     if (!s_junc.active) return;
@@ -343,26 +400,29 @@ void terrainUpdateRoad(float carX, float carZ, float carYaw, float speed, float 
         float fwd = jdx * cosf(carYaw) + jdz * sinf(carYaw);
         if (fwd < -5.f) { s_junc.active = false; s_signN = 0; }
     }
-    if (!s_committed && d < 18.f) {
-        float side = -jdx * sinf(s_junc.yaw) + jdz * cosf(s_junc.yaw);
+    if (!s_branchTaken && d < 18.f) {
+        // Signed side of the car relative to the junction (not the vector
+        // from the car back to the junction, whose sign is reversed).
+        float side = jdx * sinf(s_junc.yaw) - jdz * cosf(s_junc.yaw);
         float headingDiff = carYaw - s_junc.yaw;
         while (headingDiff > 3.14f) headingDiff -= 6.28f;
         while (headingDiff < -3.14f) headingDiff += 6.28f;
         bool left = (side < -1.2f) || (headingDiff < -0.18f);
         bool right = (side > 1.2f) || (headingDiff > 0.18f);
         if (left || right) {
-            s_committed = true; s_tookLeft = left && !right;
+            // Prefer a clear heading choice when it disagrees with position.
+            s_tookLeft = (left && !right) || (left && right && headingDiff < -0.18f);
+            s_committed = true; s_branchTaken = true;
             uint8_t dest = s_tookLeft ? s_junc.destL : s_junc.destR;
-            s_branchYaw = s_tookLeft ? s_junc.armL : s_junc.armR;
-            s_branchMix = s_tookLeft ? -1.f : 1.f;
+            s_turnYawRemaining = s_tookLeft ? s_junc.armL : s_junc.armR;
+            s_turnDistanceRemaining = 28.f;
             journeyCommitBranch(dest);
-            s_junc.active = false; s_signN = 0;
+            // Keep the fork geometry alive as the car passes it; it is culled
+            // once the junction is well behind the player. This prevents the
+            // chosen and unchosen arm from vanishing at the instant of commit.
         }
     }
-    if (fabsf(s_branchMix) > 0.01f) {
-        s_branchMix *= (1.f - 0.12f * dt);
-        if (fabsf(s_branchMix) < 0.05f) { s_branchMix = 0.f; s_branchYaw = 0.f; }
-    }
+
 }
 
 const Junction* terrainJunction() { return &s_junc; }

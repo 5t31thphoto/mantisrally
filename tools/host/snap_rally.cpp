@@ -89,8 +89,8 @@ int main() {
   (void)system("mkdir -p snaps");
   uint32_t seed = 0x52414C4Cu;
   universeInit(seed);
-  terrainInit(seed);
   journeyInit(seed);
+  terrainInit(seed);
   fieldInit();
   sceneInit();
   renderInit();

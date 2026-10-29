@@ -325,7 +325,7 @@ static void drawRidges() {
 // Heightmap raycast per column (Comanche-style): march depth, project height, paint down the column.
 static void drawRoad() {
     const Scene& sc = g_scene;
-    const float roadYaw = g_yaw;
+    const Junction* fork = terrainJunction();
     const float eyeH = 1.2f; // camera above local ground
 
     for (int bx = 0; bx < W; bx++) {
@@ -345,10 +345,25 @@ static void drawRoad() {
             if (yHit > y) { zr += step; continue; } // behind current draw line
 
             // surface classification
-            float snake = (fbm2(g_dist * 0.01f + zr * 0.02f, 0.5f, 2, worldSeed() + 3) - 0.5f) * 12.f;
-            float lat = sinf(wrapPi(a - roadYaw)) * zr - snake;
-            float absLat = fabsf(lat);
+            // Classify the ray against the same curved centerline used by
+            // physics and terrain generation. A camera-relative straight strip
+            // made the rendered road disagree with steering and off-road tests.
+            float absLat = fabsf(ts.across);
             float half = ts.roadHalf;
+            if (fork && fork->active) {
+                const float fx = wx - fork->x, fz = wz - fork->z;
+                const float leftYaw = fork->yaw + fork->armL;
+                const float rightYaw = fork->yaw + fork->armR;
+                const float branchLimit = 82.f;
+                const float leftAlong = fx * cosf(leftYaw) + fz * sinf(leftYaw);
+                const float leftAcross = -fx * sinf(leftYaw) + fz * cosf(leftYaw);
+                const float rightAlong = fx * cosf(rightYaw) + fz * sinf(rightYaw);
+                const float rightAcross = -fx * sinf(rightYaw) + fz * cosf(rightYaw);
+                if (leftAlong >= -3.f && leftAlong <= branchLimit && fabsf(leftAcross) < half)
+                    absLat = fabsf(leftAcross);
+                if (rightAlong >= -3.f && rightAlong <= branchLimit && fabsf(rightAcross) < half)
+                    absLat = fabsf(rightAcross);
+            }
 
             uint32_t hh = hash32((uint32_t)(wx * 6.f) ^ (uint32_t)(wz * 4.f) ^ (uint32_t)zr);
             float grit = (hh & 255) / 255.f;

@@ -7,8 +7,8 @@
 //  * Slide finger: direct steer.
 //  * C click / hold: handbrake.
 //  * B: centre wheel + re-take neutral pose.
-//  * A: horn.  Hold A: map.  Long-press: mute.
-//  * Tap: scan roadside thing.
+//  * A: horn. B: recenter neutral pose. C: handbrake.
+//  * Touch drag: fine steering. Tap: scan roadside thing. Long touch: mute.
 
 namespace mantis {
 

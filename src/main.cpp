@@ -17,6 +17,7 @@
 #include "audio.h"
 #include "databank.h"
 #include "ui.h"
+#include <stdint.h>
 
 // ======================= DRIFT PHYSICS TUNING =======================
 static constexpr float MASS          = 1.0f;
@@ -25,7 +26,7 @@ static constexpr float ENGINE_FORCE  = 62.f;     // accel at full throttle
 static constexpr float BRAKE_FORCE   = 52.f;
 static constexpr float DRAG          = 0.008f;
 static constexpr float ROLL_RES      = 0.22f;
-static constexpr float STEER_GAIN    = 3.8f;     // yaw response vs steer*speed
+static constexpr float STEER_GAIN    = 2.6f;     // yaw response vs steer*speed
 static constexpr float GRIP_LAT      = 14.f;     // lateral tire force scale
 static constexpr float GRIP_LONG     = 11.f;
 static constexpr float HB_REAR_CUT   = 0.22f;    // handbrake rear grip multiplier
@@ -49,6 +50,10 @@ static const char* bannerText = nullptr;
 static char bannerBuf[64];
 static uint8_t lastBiome = 255;
 static float camLean = 0.f;
+static float hintTimer = 0.f;
+static float driftTime = 0.f, driftPoints = 0.f;
+static uint32_t totalScore = 0;
+static bool driftWasScoring = false;
 
 static uint8_t scanKind = 0;
 static int scanIdx = -1;
@@ -109,6 +114,100 @@ static void serviceScan(float dt) {
     }
 }
 
+static void overlayRect(uint16_t* b, int x, int y, int w, int h, uint16_t color) {
+    if (!b) return;
+    if (x < 0) { w += x; x = 0; } if (y < 0) { h += y; y = 0; }
+    if (x + w > 320) w = 320 - x;
+    if (y + h > 240) h = 240 - y;
+    if (w <= 0 || h <= 0) return;
+    for (int yy = y; yy < y + h; ++yy) {
+        uint16_t* row = b + yy * 320 + x;
+        for (int xx = 0; xx < w; ++xx) row[xx] = color;
+    }
+}
+
+static void overlayText(uint16_t* b, int x, int y, const char* text, uint16_t color, int scale=1) {
+    if (b && text && *text) mantis::uiText(b, 320, 240, x, y, text, color, scale, true);
+}
+
+// The world renderer is intentionally text-free and tiny; this native-resolution
+// overlay supplies the actual driving instruments without spending palette slots.
+static void drawGameOverlay() {
+    using namespace mantis;
+    uint16_t* b = overlayBuffer();
+    if (!b) return;
+    overlayClear();
+    const uint16_t panel = rgb565(8, 12, 20);
+    const uint16_t white = rgb565(242, 246, 250);
+    const uint16_t mint = rgb565(0, 220, 180);
+    const uint16_t lime = rgb565(170, 255, 70);
+    const uint16_t amber = rgb565(255, 190, 45);
+    const uint16_t red = rgb565(255, 75, 65);
+    overlayRect(b, 0, 0, 320, 39, panel);
+
+    char text[64];
+    const float kmh = fabsf(carSpeed) * 3.6f;
+    snprintf(text, sizeof(text), "%03d KM/H", (int)clampf(kmh, 0.f, 999.f));
+    overlayText(b, 7, 5, text, lime, 2);
+    snprintf(text, sizeof(text), "%04.1f KM", distanceTravelled * 0.001f);
+    overlayText(b, 220, 7, text, white, 1);
+    const BiomeInfo& biome = journeyBiome(journeyCurrent());
+    // Grip is written to the shared scene after the physics step.
+    snprintf(text, sizeof(text), "%s  GRIP %02d%%", biome.shortName, (int)(clampf(g_scene.grip, 0.f, 1.f) * 100.f));
+    overlayText(b, 8, 26, text, mint, 1);
+    snprintf(text, sizeof(text), "SCORE %lu", (unsigned long)(totalScore + (uint32_t)driftPoints));
+    overlayText(b, 220, 26, text, amber, 1);
+
+    const Junction* j = terrainJunction();
+    if (j && j->active) {
+        float jdx = j->x - carX, jdz = j->z - carZ;
+        float jd = sqrtf(jdx*jdx + jdz*jdz);
+        if (jd < 85.f) {
+            overlayRect(b, 12, 43, 296, 17, panel);
+            snprintf(text, sizeof(text), "FORK %02dM  L:%s  R:%s", (int)jd,
+                     journeyBiome(j->destL).shortName, journeyBiome(j->destR).shortName);
+            overlayText(b, 18, 48, text, amber, 1);
+        }
+    }
+
+    if (offRoadActive) {
+        const int remainTenths = (int)ceilf(fmaxf(0.f, 3.f - offRoadTimer) * 10.f);
+        overlayRect(b, 36, 91, 248, 47, panel);
+        snprintf(text, sizeof(text), "OFF ROAD  %d.%d", remainTenths / 10, remainTenths % 10);
+        int tw = uiTextWidth(text, 2);
+        overlayText(b, (320 - tw) / 2, 99, text, red, 2);
+        overlayRect(b, 48, 124, 224, 5, rgb565(55, 30, 35));
+        overlayRect(b, 48, 124, (int)(224.f * clampf(offRoadTimer / 3.f, 0.f, 1.f)), 5, red);
+    } else if (g_hud.banner && g_hud.bannerA > 0.1f) {
+        overlayRect(b, 48, 95, 224, 23, panel);
+        int tw = uiTextWidth(g_hud.banner, 2);
+        overlayText(b, (320 - tw) / 2, 103, g_hud.banner, white, 2);
+    }
+
+    if (driftWasScoring && driftTime > 0.25f) {
+        snprintf(text, sizeof(text), "DRIFT x%1.1f  +%lu", 1.f + fminf(driftTime, 5.f) * 0.25f,
+                 (unsigned long)driftPoints);
+        overlayRect(b, 8, 65, 152, 15, panel);
+        overlayText(b, 13, 69, text, amber, 1);
+    }
+    if (scanKind) {
+        overlayRect(b, 78, 178, 164, 18, panel);
+        overlayText(b, 88, 184, "SCANNING OBJECT", mint, 1);
+    } else if (scanDoneT > 0.f) {
+        overlayRect(b, 78, 178, 164, 18, panel);
+        overlayText(b, 88, 184, "SCAN COMPLETE", lime, 1);
+    }
+    if (audioMuted()) {
+        overlayRect(b, 258, 65, 54, 16, panel);
+        overlayText(b, 265, 70, "MUTED", red, 1);
+    }
+    if (hintTimer > 0.f) {
+        overlayRect(b, 0, 220, 320, 20, panel);
+        overlayText(b, 7, 226, "TILT DRIVE  TOUCH STEER/SCAN  A HORN  B LEVEL  C DRIFT", white, 1);
+    }
+    overlayEnable(true);
+}
+
 void setup() {
     auto cfg = M5.config();
     cfg.internal_imu = true;
@@ -120,8 +219,8 @@ void setup() {
     seed ^= (uint32_t)esp_random();
 #endif
     mantis::universeInit(seed);
-    mantis::terrainInit(seed);
     mantis::journeyInit(seed);
+    mantis::terrainInit(seed);
     mantis::fieldInit();
     mantis::sceneInit();
     mantis::renderInit();
@@ -174,7 +273,9 @@ void loop() {
     // Keep full 3-D movement available, but loose ground costs grip and speed.
     if (offRoadNow) {
         const float severity = clampf(offRoadDistance / 9.f, 0.f, 1.f);
-        grip *= 0.62f - 0.18f * severity;
+        // A soft transition: just leaving the asphalt costs some grip, deep
+        // shortcuts cost more, but never make the car uncontrollable.
+        grip *= 0.76f - 0.24f * severity;
     }
 
     float throttle = helmThrottle();
@@ -206,7 +307,10 @@ void loop() {
 
     // Longitudinal: engine + brake + drag
     float eng = throttle * ENGINE_FORCE * (1.f - clampf(fabsf(vLong) / MAX_SPEED, 0.f, 1.f));
-    float brk = -brake * BRAKE_FORCE * (vLong > 0.f ? 1.f : -1.f);
+    // Brake opposes motion. At a standstill it holds the car instead of
+    // accidentally applying reverse thrust.
+    float brk = fabsf(vLong) > 0.35f
+        ? -brake * BRAKE_FORCE * (vLong > 0.f ? 1.f : -1.f) : 0.f;
     if (hb && fabsf(vLong) > 2.f) brk -= (vLong > 0.f ? 1.f : -1.f) * 18.f * grip;
     // gravity on slope: downhill pulls you, uphill fights
     float grav = -slope * 18.f;
@@ -223,7 +327,7 @@ void loop() {
     velZ = fwdZ * vLong + rightZ * vLat;
 
     // Yaw from steering + from slip (drift rotation)
-    float steerYaw = steer * STEER_GAIN * clampf(fabsf(vLong) / 10.f, 0.55f, 1.f) * fmaxf(gripAvg, 0.35f);
+    float steerYaw = steer * STEER_GAIN * clampf(fabsf(vLong) / 10.f, 0.f, 1.f) * fmaxf(gripAvg, 0.35f);
     // Counter-steer / oversteer: when slipping, yaw rate follows slip
     float driftYaw = slipAngle * 1.8f * clampf(fabsf(vLong) / 15.f, 0.f, 1.f);
     if (hb) driftYaw *= 1.6f;
@@ -247,9 +351,15 @@ void loop() {
     const float afterOffRoadDistance = fabsf(afterMove.across) - afterMove.roadHalf;
     offRoadActive = afterOffRoadDistance > 0.35f;
     if (offRoadActive) {
+        const float groundSeverity = clampf(afterOffRoadDistance / 9.f, 0.f, 1.f);
+        grip = afterMove.grip * (0.76f - 0.24f * groundSeverity);
+    } else {
+        grip = afterMove.grip;
+    }
+    if (offRoadActive) {
         offRoadTimer += dt;
         const float severity = clampf(afterOffRoadDistance / 9.f, 0.f, 1.f);
-        const float scrub = 0.10f + 0.12f * severity;
+        const float scrub = 0.06f + 0.08f * severity;
         const float damp = fmaxf(0.f, 1.f - scrub * dt);
         velX *= damp;
         velZ *= damp;
@@ -278,6 +388,28 @@ void loop() {
 
     slipAmt = clampf(fabsf(slipAngle) * 1.4f + (hb ? 0.35f : 0.f), 0.f, 1.f);
 
+    // Bank points for controlled, sustained slides. A short wiggle earns little;
+    // holding a fast drift builds a multiplier, and ending it banks the combo.
+    bool scoringDrift = fabsf(carSpeed) > 7.f && fabsf(slipAngle) > 0.16f;
+    if (scoringDrift) {
+        driftTime += dt;
+        float multiplier = 1.f + fminf(driftTime, 5.f) * 0.25f;
+        float scoredSlip = clampf(fabsf(slipAngle) * 1.6f, 0.f, 1.f);
+        driftPoints += fabsf(carSpeed) * scoredSlip * (hb ? 1.35f : 1.f) * 8.f * multiplier * dt;
+        driftWasScoring = true;
+    } else if (driftWasScoring) {
+        if (driftTime >= 0.45f && driftPoints >= 10.f) {
+            uint32_t earned = (uint32_t)driftPoints;
+            totalScore += earned;
+            snprintf(bannerBuf, sizeof(bannerBuf), "DRIFT +%lu", (unsigned long)earned);
+            bannerText = bannerBuf; bannerT = 1.5f;
+            hx::kick(clampf(driftPoints / 500.f, 0.2f, 1.f));
+            sfxUi(UI_SCAN_OK);
+        }
+        driftTime = driftPoints = 0.f;
+        driftWasScoring = false;
+    }
+
     if (bump > 0.12f && !wasBumped) {
         sfxBump(bump);
         hx::bump(bump);
@@ -288,23 +420,24 @@ void loop() {
 
     hx::engine(throttle, fabsf(carSpeed));
     hx::rumble(fmaxf(ts.roughness * 0.45f + slipAmt * 0.85f + (hb ? 0.25f : 0.f), offRoadActive ? 0.42f + 0.30f * clampf(afterOffRoadDistance / 9.f, 0.f, 1.f) : 0.f));
+    hx::update(dt);
 
     distanceTravelled += sqrtf(dx * dx + dz * dz);
     stageTime += dt;
 
     // Road graph
-    terrainUpdateRoad(carX, carZ, carYaw, fabsf(carSpeed), dt);
+    terrainUpdateRoad(carX, carZ, carYaw, fmaxf(0.f, carSpeed), dt);
     bool tookLeft = false;
     if (terrainBranchCommitted(tookLeft)) {
         uint8_t dest = journeyNext();
-        snprintf(bannerBuf, sizeof(bannerBuf), "→ %s", journeyBiome(dest).name);
+        snprintf(bannerBuf, sizeof(bannerBuf), "ROUTE: %s", journeyBiome(dest).name);
         bannerText = bannerBuf;
         bannerT = 2.5f;
         sfxUi(UI_SCAN_OK);
         hx::pop(0.3f, 0.04f);
     }
 
-    journeyUpdate(carX, carZ, fabsf(carSpeed), dt);
+    journeyUpdate(carX, carZ, fmaxf(0.f, carSpeed), dt);
     if (journeyCurrent() != lastBiome) {
         lastBiome = journeyCurrent();
         snprintf(bannerBuf, sizeof(bannerBuf), "%s", journeyBiome(lastBiome).name);
@@ -319,7 +452,9 @@ void loop() {
                 distanceTravelled, fabsf(carSpeed), throttle, grip, slipAmt, hb);
     serviceScan(dt);
 
+    hintTimer = fmaxf(0.f, hintTimer - dt);
     g_hud.throttle = throttle;
+    g_hud.hintA = clampf(hintTimer / 2.f, 0.f, 1.f);
     g_hud.scanT = scanT;
     g_hud.banner = bannerT > 0.f ? bannerText : nullptr;
     g_hud.bannerA = bannerT > 0.f ? fminf(1.f, bannerT) : 0.f;
@@ -340,6 +475,7 @@ void loop() {
     camLean += (leanWant - camLean) * (1.f - expf(-dt * 6.f));
     float camPitch = helmPitch() - brake * 0.06f + throttle * 0.03f - slipAmt * 0.04f;
     renderFrame(carX, carY, carZ, carYaw + camLean * 0.35f, camPitch, t);
+    drawGameOverlay();
     displayPresent();
 }
 

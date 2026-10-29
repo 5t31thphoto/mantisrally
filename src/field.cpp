@@ -107,8 +107,16 @@ void fieldUpdate(float carX, float carZ, float carYaw, float speed, float dt) {
     s_carX = carX; s_carZ = carZ; s_carYaw = carYaw;
     s_spawnAcc += speed * dt;
 
-    // Cull behind / far
-    float ax = cosf(carYaw), az = sinf(carYaw);
+    // Place roadside scenery relative to the actual curved ribbon, not the
+    // player's temporary drift heading. This keeps props on the shoulders in
+    // bends and lets the player look/slide away without rotating the world.
+    float roadX, roadZ, roadCurv;
+    terrainDirection(carX, carZ, roadX, roadZ, roadCurv);
+    (void)roadCurv;
+    float roadYaw = atan2f(roadZ, roadX);
+
+    // Cull behind / far along the road
+    float ax = roadX, az = roadZ;
     for (int i = 0; i < FIELD_N; i++) {
         if (!s_obj[i].on) continue;
         float dx = s_obj[i].x - carX, dz = s_obj[i].z - carZ;
@@ -123,7 +131,7 @@ void fieldUpdate(float carX, float carZ, float carYaw, float speed, float dt) {
     static float lastSpawn = 0.f;
     if (s_spawnAcc - lastSpawn > 12.f) {
         lastSpawn = s_spawnAcc;
-        spawnWave(carX + ax * 40.f, carZ + az * 40.f, carYaw);
+        spawnWave(carX + ax * 40.f, carZ + az * 40.f, roadYaw);
     }
 }
 
