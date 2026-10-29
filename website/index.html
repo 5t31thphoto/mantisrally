@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mantis Rally — infinite stages that dream themselves</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,800&family=Literata:opsz,wght@7..72,400;7..72,600&display=swap" rel="stylesheet">
+<script type="module" src="https://unpkg.com/esp-web-tools@10.0.1/dist/web/install-button.js?module"></script>
+<style>
+  :root {
+    --asphalt: #2a2a2e;
+    --gravel: #8b7355;
+    --sky: #c45c26;
+    --dusk: #1a0f2e;
+    --night: #0a0612;
+    --line: #f2e6c8;
+    --accent: #e8a838;
+    --ink: #f5efe6;
+    --ink-dim: #b8a99a;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    font-family: "Literata", Georgia, serif;
+    font-size: 1.06rem;
+    line-height: 1.68;
+    background: linear-gradient(180deg, #e8a868 0, var(--sky) 480px, #5c3a2a 1200px, var(--dusk) 2000px, var(--night) 100%);
+    min-height: 100vh;
+  }
+  main { max-width: 920px; margin: 0 auto; padding: 0 28px 80px; }
+  .hero { min-height: 88vh; display: grid; align-content: center; padding: 56px 0 32px; }
+  h1 {
+    font-family: "Bricolage Grotesque", sans-serif; font-weight: 800;
+    font-size: clamp(2.8rem, 8vw, 6.2rem); line-height: 0.9; letter-spacing: -0.03em;
+    margin: 0; color: #fff8f0;
+    text-shadow: 0 2px 0 rgba(40, 16, 0, 0.35);
+  }
+  h1 small {
+    display: block; font-size: 0.32em; font-weight: 500; letter-spacing: -0.01em;
+    color: #3a1e10; margin-top: 0.85em; max-width: 24ch; line-height: 1.2;
+  }
+  .lede { max-width: 38ch; margin: 1.4em 0 0; color: #2a1810; font-size: 1.12rem; }
+  .flash {
+    margin-top: 2.2em; padding: 1.4em 1.5em; border-radius: 14px;
+    background: rgba(10, 6, 18, 0.72); border: 1px solid rgba(242, 230, 200, 0.22);
+    max-width: 420px;
+  }
+  .flash h2 {
+    font-family: "Bricolage Grotesque", sans-serif; font-size: 1rem; font-weight: 800;
+    margin: 0 0 0.6em; letter-spacing: 0.04em; text-transform: uppercase; color: var(--accent);
+  }
+  .flash p { margin: 0 0 1em; color: var(--ink-dim); font-size: 0.95rem; }
+  esp-web-install-button { display: block; }
+  esp-web-install-button button, .install-fallback {
+    font-family: "Bricolage Grotesque", sans-serif; font-weight: 800; font-size: 1.05rem;
+    background: var(--accent); color: #1a0f08; border: none; border-radius: 999px;
+    padding: 0.75em 1.4em; cursor: pointer; width: 100%;
+  }
+  esp-web-install-button button:hover, .install-fallback:hover { filter: brightness(1.08); }
+  .unsupported { color: var(--ink-dim); font-size: 0.9rem; margin-top: 0.8em; }
+  section { margin: 4.5em 0; }
+  h2 {
+    font-family: "Bricolage Grotesque", sans-serif; font-weight: 800;
+    font-size: clamp(1.6rem, 3.5vw, 2.2rem); letter-spacing: -0.02em; margin: 0 0 0.6em;
+  }
+  .controls {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px;
+  }
+  .controls div {
+    background: rgba(10, 6, 18, 0.55); border: 1px solid rgba(242, 230, 200, 0.15);
+    border-radius: 12px; padding: 1em 1.1em;
+  }
+  .controls b { font-family: "Bricolage Grotesque", sans-serif; color: var(--accent); display: block; margin-bottom: 0.25em; }
+  .gallery {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px;
+  }
+  .gallery figure {
+    margin: 0; background: rgba(10, 6, 18, 0.5); border-radius: 12px; overflow: hidden;
+    border: 1px solid rgba(242, 230, 200, 0.12);
+  }
+  .gallery img { display: block; width: 100%; height: auto; image-rendering: pixelated; }
+  .gallery figcaption { padding: 0.7em 0.9em; font-size: 0.9rem; color: var(--ink-dim); }
+  .gallery figcaption b { color: var(--ink); }
+  footer {
+    margin-top: 5em; padding-top: 1.5em; border-top: 1px solid rgba(242, 230, 200, 0.18);
+    color: var(--ink-dim); font-size: 0.92rem;
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="hero">
+    <h1>Mantis Rally<small>an infinite stage that dreams itself</small></h1>
+    <p class="lede">
+      Tip the Core2 forward to gas, pull back to brake, tilt to steer, hold C for the handbrake.
+      Seventeen biomes, branching roads, drifts that stick. Everything is made live on the device.
+    </p>
+    <div class="flash">
+      <h2>Flash to Core2</h2>
+      <p>Chrome or Edge, USB cable, hold the device in download mode if needed. Same web installer pattern as Planet and Seadiver.</p>
+      <esp-web-install-button manifest="./firmware/manifest.json">
+        <button slot="activate">Install Mantis Rally</button>
+        <span slot="unsupported" class="unsupported">
+          Web flasher needs Chrome / Edge on desktop with WebSerial.
+          Or flash <code>firmware/firmware-merged.bin</code> with esptool at offset 0.
+        </span>
+      </esp-web-install-button>
+    </div>
+  </div>
+
+  <section>
+    <h2>Drive</h2>
+    <div class="controls">
+      <div><b>Tip forward</b>Throttle</div>
+      <div><b>Pull back</b>Brake</div>
+      <div><b>Tilt left / right</b>Steer</div>
+      <div><b>Hold C</b>Handbrake / drift</div>
+      <div><b>A</b>Horn</div>
+      <div><b>Long-press A</b>Mute</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Stages</h2>
+    <p>Forest gravel, mountain dirt, coast tarmac, alpine snow, desert track, canyon switchbacks, storm moors, night city, volcano ash — pick a fork and the world commits.</p>
+    <div class="gallery">
+      <figure>
+        <img src="assets/01_dawn_forest.png" alt="Dawn forest gravel road">
+        <figcaption><b>Dawn forest.</b> Gravel and early light.</figcaption>
+      </figure>
+      <figure>
+        <img src="assets/02_noon_desert.png" alt="Desert track under noon sky">
+        <figcaption><b>Desert track.</b> Slip and dust.</figcaption>
+      </figure>
+      <figure>
+        <img src="assets/03_sunset_alpine.png" alt="Alpine snow road at sunset">
+        <figcaption><b>Alpine snow.</b> Low grip, long light.</figcaption>
+      </figure>
+      <figure>
+        <img src="assets/04_storm_moor.png" alt="Storm over the moor">
+        <figcaption><b>Storm moor.</b> Rain and grey sky.</figcaption>
+      </figure>
+      <figure>
+        <img src="assets/05_coast_tarmac.png" alt="Coast tarmac">
+        <figcaption><b>Coast tarmac.</b> High grip, open horizon.</figcaption>
+      </figure>
+      <figure>
+        <img src="assets/08_volcano_ash.png" alt="Volcano ash stage">
+        <figcaption><b>Volcano ash.</b> Rough and loud.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <footer>
+    Mantis Rally joins MantisPlanet and Mantis Seadiver. Built for M5Stack Core2.
+    Firmware is produced by GitHub Actions and served from this page.
+  </footer>
+</main>
+</body>
+</html>
