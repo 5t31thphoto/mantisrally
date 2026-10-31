@@ -19,7 +19,7 @@ extern CarAudio g_car;
 
 enum : uint8_t { BUMP_TREE, BUMP_ROCK, BUMP_WATER };
 enum : uint8_t { CRIT_DEER, CRIT_RABBIT, CRIT_BIRDS, CRIT_BUTTERFLY, CRIT_DUCK, CRIT_BEAVER, CRIT_SQUIRREL, CRIT_SPLASH, CRIT_HERON };
-enum : uint8_t { IMP_TREE, IMP_ROCK, IMP_DEER, IMP_CRUNCH, IMP_WIPE, IMP_WIPE_DEER };
+enum : uint8_t { IMP_TREE, IMP_ROCK, IMP_DEER, IMP_CRUNCH, IMP_WIPE, IMP_WIPE_DEER, IMP_SHUTTER };
 enum : uint8_t { UI_TICK, UI_OK, UI_SOLD, UI_ARRIVE, UI_FORK, UI_WARN, UI_MUTE };
 
 void audioSpeakerBegin();   // right after M5.begin(), before other allocations

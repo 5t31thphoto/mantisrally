@@ -48,7 +48,7 @@ int main(int argc, char** argv) {
     }
     if (i < 15) { st = 0; tip = 0; }
     tilt(st > 1 ? 1 : (st < -1 ? -1 : st), tip);
-    if (mode == 2) M5.BtnC.pressed = fabsf(st) > 0.8f && car.speed > 12.f;
+    if (mode == 2) M5.BtnC.down = fabsf(st) > 0.8f && car.speed > 12.f;
     g_us += 33333;
     setTimeOfDay(tod, t, distance);
     switch (wx) {

@@ -16,6 +16,8 @@
 #include "audio.h"
 #include "progress.h"
 #include "store.h"
+#include "storage.h"
+#include "photo.h"
 #include "mem.h"
 
 using namespace mantis;
@@ -78,7 +80,9 @@ void setup() {
 #ifndef HOST
     seed ^= (uint32_t)esp_random();
 #endif
+    storageInit();                               // the SD card (shares the LCD's bus: after the display)
     progressInit();
+    g_prog.view = VIEW_COCKPIT;                  // you always start in the driver's seat
     universeInit(seed);
     journeyInit(seed);
     journeySetVisited(g_prog.visited);
@@ -118,11 +122,37 @@ void loop() {
     // ---------------- the dealership ----------------
     if (storeActive()) {
         bool changed = false;
-        if (!storeUpdate(ev.tap, ev.tapX, ev.tapY, changed)) { message("DRIVE SAFE", nullptr, 1.5f); }
+        if (!storeUpdate(ev.tap, ev.tapX, ev.tapY, changed)) { message("DRIVE SAFE", nullptr, 1.5f); progressSave(); }
         if (changed) { switchVehicle(g_prog.current); sfxUi(UI_SOLD); }
         displayPresent();
         hx::update(dt);
         return;
+    }
+    // ---------------- photo mode ----------------
+    if (photoActive()) {
+        if (ev.view) { photoExit(); sfxUi(UI_TICK); ev.view = false; g_prog.view = VIEW_COCKPIT; }   // B: back in the car, back to driving
+        else {
+            if (ev.cPress) { photoNextAngle(); sfxUi(UI_TICK); }    // C: the next angle
+            photoUpdate(dt, helmSteer(), helmTip());
+            terrainUpdate(car.x, car.z, car.yaw, 0.f, dt);
+            sceneUpdate(t, dt, car.x, car.z, car.yaw, 0.f, distance);
+            fieldUpdate(car, veh, dt);
+            renderFrame();
+            if (ev.horn) sfxImpact(IMP_SHUTTER, 1.f);                // A: the shutter
+            photoCompose(ev.horn);
+            displayPresent();
+            hx::update(dt);
+            return;
+        }
+    }
+    if (ev.horn && car.speed < 0.6f && !storeActive()) {            // stopped: A opens the camera
+        photoEnter(car, veh); sfxUi(UI_OK); ev.horn = false;
+        g_car.throttle = 0.f;
+        return;
+    }
+    if (ev.doubleTap) {                                             // stuck: a double tap puts you back on the road
+        placeOnRoad(true); offT = 0.f; stallT = 0.f;
+        message("BACK ON THE ROAD", nullptr, 1.5f); sfxUi(UI_WARN);
     }
     if (ev.view) { g_prog.view = (uint8_t)((g_prog.view + 1) % VIEW_N); sfxUi(UI_TICK); }
     if (ev.recenter) { sfxUi(UI_OK); hx::pop(0.3f, 0.04f); }

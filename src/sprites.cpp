@@ -5,6 +5,7 @@
 #include "vehicle.h"
 #include "universe.h"
 #include "mem.h"
+#include "store_art.h"
 #include <math.h>
 #include <string.h>
 
@@ -222,6 +223,11 @@ void spritesInit() {
     makeFlowers(T_FLOWERS, 157);
     makeStore();
     for (int p = 0; p < 4; p++) makeDeer((uint8_t)(T_DEER0 + p), p, 1);
+    // the MANTIS MOTORS arrow (from the sign sheet: tools/sprites/make_store_art.py)
+    s_tpl[T_MMSIGN].w = art::MM_SIGN_W; s_tpl[T_MMSIGN].h = art::MM_SIGN_H; s_tpl[T_MMSIGN].ax = (int8_t)art::MM_SIGN_AX;
+    s_tpl[T_MMSIGN].px = const_cast<uint8_t*>(art::MM_SIGN);
+    s_tpl[T_MMSIGN_L].w = art::MM_SIGN_W; s_tpl[T_MMSIGN_L].h = art::MM_SIGN_H; s_tpl[T_MMSIGN_L].ax = (int8_t)art::MM_SIGN_AXL;
+    s_tpl[T_MMSIGN_L].px = const_cast<uint8_t*>(art::MM_SIGN_L);
 }
 
 // ---------------------------------------------------------------- 3x5 font

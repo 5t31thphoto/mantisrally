@@ -19,6 +19,7 @@ constexpr bool  INVERT_TIP      = false;   // + = top away = throttle
 constexpr uint32_t HOLD_B_MS    = 650;
 constexpr uint32_t MUTE_HOLD_MS = 1500;
 constexpr uint32_t TAP_MS       = 400;
+constexpr uint32_t DOUBLE_MS    = 420;     // the second tap must follow within this
 // ======================================================
 
 static float s_steer = 0.f, s_tip = 0.f;
@@ -30,6 +31,7 @@ static uint32_t s_bDown = 0; static bool s_bWas = false, s_bHeld = false;
 static bool s_aWas = false;
 static bool s_touch = false, s_moved = false, s_muteFired = false;
 static int s_tx0 = 0, s_ty0 = 0; static uint32_t s_tt0 = 0;
+static uint32_t s_lastTap = 0; static int s_ltx = 0, s_lty = 0;
 
 static inline float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b : v); }
 static void attitude(float ax, float ay, float az, float& pitch, float& roll) {
@@ -65,6 +67,7 @@ void helmUpdate(float dt, HelmEvents& ev) {
     bool a = M5.BtnA.isPressed(), b = M5.BtnB.isPressed(), c = M5.BtnC.isPressed();
     if (a && !s_aWas) ev.horn = true;
     s_aWas = a;
+    if (c && !s_hb) ev.cPress = true;
     s_hb = c;
     uint32_t now = millis();
     if (b && !s_bWas) { s_bDown = now; s_bHeld = false; }
@@ -92,7 +95,11 @@ void helmUpdate(float dt, HelmEvents& ev) {
         if (abs(t.x - s_tx0) + abs(t.y - s_ty0) > 14) s_moved = true;
         if (!s_moved && !s_muteFired && now - s_tt0 > MUTE_HOLD_MS) { s_muteFired = true; ev.mute = true; }
     } else if (!down && s_touch) {
-        if (!s_moved && !s_muteFired && now - s_tt0 < TAP_MS) { ev.tap = true; ev.tapX = s_tx0; ev.tapY = s_ty0; }
+        if (!s_moved && !s_muteFired && now - s_tt0 < TAP_MS) {
+            ev.tap = true; ev.tapX = s_tx0; ev.tapY = s_ty0;
+            if (s_lastTap && now - s_lastTap < DOUBLE_MS && abs(s_tx0 - s_ltx) + abs(s_ty0 - s_lty) < 60) { ev.doubleTap = true; s_lastTap = 0; }
+            else { s_lastTap = now; s_ltx = s_tx0; s_lty = s_ty0; }
+        }
         s_touch = false;
     }
 }

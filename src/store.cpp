@@ -6,6 +6,7 @@
 #include "display.h"
 #include "ui.h"
 #include "vehicle_art.h"
+#include "store_art.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -38,15 +39,15 @@ static int textWrap(uint16_t* b, int x, int y, const char* s, uint16_t c, int ma
     return y;
 }
 
-static void drawVehicle(uint16_t* b, int v, int cx, int baseY, int sc) {
-    const art::VehArt& a = art::VEH_ART[v];
-    const uint8_t* px = a.px;
+// the vehicle for sale in profile: the sprite sheet's side view, full colour
+static void drawSide(uint16_t* b, int v, int cx, int baseY) {
+    const art::SideArt& a = art::SIDE_ART[v];
+    int x0 = cx - a.w / 2, y0 = baseY - a.h;
     for (int y = 0; y < a.h; y++) for (int x = 0; x < a.w; x++) {
-        int k = y * a.w + x;
-        uint8_t p = (k & 1) ? (px[k >> 1] & 15) : (px[k >> 1] >> 4);
+        uint16_t p = a.px[y * a.w + x];
         if (!p) continue;
-        const uint8_t* c = a.pal + (p - 1) * 3;
-        rect(b, cx + (x - a.ax) * sc, baseY + (y - a.ay) * sc, sc, sc, rgb565(c[0], c[1], c[2]));
+        int X = x0 + x, Y = y0 + y;
+        if ((unsigned)X < 320u && (unsigned)Y < 240u) b[Y * 320 + X] = p;
     }
 }
 
@@ -68,7 +69,7 @@ static void draw() {
     if (nxt >= 0) {
         const VehicleSpec& S = vehicleSpec((uint8_t)nxt);
         rect(b, 12, 32, 296, 112, panel);
-        drawVehicle(b, nxt, 82, 118, nxt == V_BIKE ? 2 : 2);
+        drawSide(b, nxt, 82, 132);
         text(b, 156, 36, S.name, white, 1);
         int ty = textWrap(b, 156, 47, S.blurb1, grey, 150, 9);
         textWrap(b, 156, ty, S.blurb2, mag, 150, 9);

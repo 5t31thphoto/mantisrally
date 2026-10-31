@@ -13,6 +13,7 @@
 #include "mem.h"
 #include "vehicle_art.h"
 #include "cockpit_art.h"
+#include "display.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -120,6 +121,7 @@ static Ramp4 artist(const uint8_t* d, const uint8_t* l) {
 static Ramp4 blendR(const Ramp4& a, const Ramp4& b, float t) { Ramp4 r; for (int i = 0; i < 4; i++) r.k[i] = mix(a.k[i], b.k[i], t); return r; }
 
 static float s_night = 0.f, s_lights = 0.f, s_sunK = 1.f;
+static float s_artLit[3] = {1.f, 1.f, 1.f};      // the scene's light on the hero art (photo mode)
 static float s_sunDx = 0.f, s_sunDy = 1.f, s_sunDz = 0.f;
 
 static void buildPalette() {
@@ -136,9 +138,10 @@ static void buildPalette() {
     S.amb = scale(S.amb, 1.f - 0.25f * grey); 
     s_sunK = (1.f - 0.75f * grey) * clampf((S.elev + 0.05f) * 4.f, 0.f, 1.f);
     s_night = S.night;
-    s_lights = sc.lights;
+    s_lights = g_view.photo ? 0.f : sc.lights;      // photos: the camera is not the car, so no beams from it
     // the key light: the sun by day; the headlights by night
     C3 key = scale(S.key, 1.f - 0.75f * grey);
+    C3 skyKey = key;                                 // daylight / moonlight only (the art in a photo isn't in its own beams)
     C3 HEAD = {255, 238, 205};
     key = mix(key, HEAD, clampf(s_lights * (0.25f + S.night * 0.9f), 0.f, 1.f));
     C3 amb = S.amb;
@@ -200,6 +203,7 @@ static void buildPalette() {
     static const C3 FL[8] = {{250, 250, 240}, {255, 220, 60}, {200, 120, 230}, {255, 130, 170}, {230, 60, 60}, {110, 150, 255}, {255, 160, 60}, {245, 245, 255}};
     for (int i = 0; i < 8; i++) P[P_FLOWER + i] = mix(add(scale(mul(FL[i], amb), 0.8f), scale(mul(FL[i], key), 0.45f)), mul(FL[i], amb), 0.3f);
     if (A.accent[0] > 0) P[P_FLOWER + 2] = mix(P[P_FLOWER + 2], litR(leaf2, 0.8f), 0.6f);
+    for (int k = 0; k < 3; k++) { float a = (&amb.r)[k], kk = (&skyKey.r)[k] * (1.f - S.night); s_artLit[k] = clampf((a * 0.62f + kk * 0.48f) / 255.f, 0.08f, 1.15f); }
     // the vehicle and its cockpit, lit by the scene
     const art::VehArt& va = art::VEH_ART[s_veh];
     const art::CockArt& ca = art::COCK_ART[s_veh];
@@ -269,7 +273,11 @@ static void setupCamera() {
     const ViewInfo& v = g_view;
     const VehicleSpec& V = vehicleSpec(v.vehicle);
     float pitch, roll;
-    if (v.view == VIEW_CHASE) {
+    if (v.photo) {
+        cx = v.pX; cy = v.pY; cz = v.pZ; cyaw = v.pYaw;
+        F = 96.f; pitch = v.pPitch; roll = 0.f;
+        hor0 = H * 0.5f + tanf(pitch) * F;
+    } else if (v.view == VIEW_CHASE) {
         float back = v.vehicle == V_BIKE ? 3.9f : 6.6f;
         if (!s_camInit) { s_camYaw = v.yaw; s_camY = v.groundY; s_camInit = true; }
         s_camYaw += wrapPi(v.yaw - s_camYaw) * clampf(g_scene.dt * 3.2f, 0.f, 1.f);
@@ -848,6 +856,8 @@ MR_HOT static void blitTpl(uint8_t id, float sx, float baseY, float pxH, float d
                 case TM_GLASS: c = P_WINDOW; break;
                 case TM_SIGN:  c = (v & 15) > 12 ? P_SIGN_W : P_SIGN_G; break;
                 case TM_SIGNTXT: c = P_SIGN_W; break;
+                case TM_SIGNY: c = (uint8_t)(P_LINE_Y + clampi(sh / 4, 0, 3)); break;   // lit like the road paint: it shines in the headlights
+                case TM_INK:   c = (uint8_t)(P_ROAD + 1); break;
                 default:       c = (uint8_t)(P_SNOW + 7); break;
             }
             if (fog > 0.72f || (fog > 0.42f && ((x ^ y) & 1))) c = (uint8_t)(P_HAZE + clampi(8 + (sh - 8) / 3, 0, 15));
@@ -946,6 +956,13 @@ static void drawSignAndStore() {
             for (int y = (int)(sy - post); y < (int)sy; y++) { putZ((int)(x0 + pw * 0.2f), y, P_BLACK, zc); putZ((int)(x0 + pw * 0.8f), y, P_BLACK, zc); }
             drawSignText(x0, y0, (int)pw, (int)ph, zc);
         }
+    }
+    const MotorSign* ms = roadMotorSign();                // MANTIS MOTORS, a quarter mile: the arrow points at its side
+    if (ms && ms->active) {
+        float h = terrainHeight(ms->x, ms->z);
+        float sx, sy, d;
+        if (renderProject(ms->x, h, ms->z, sx, sy, d) && d < 260.f)
+            blitTpl(ms->travelSide < 0 ? T_MMSIGN_L : T_MMSIGN, sx, sy + 1.f, 4.3f * F / d, d, false, false, headAt((ms->x - cx) * rx + (ms->z - cz) * rz, d) * 1.5f);
     }
     const Store* st = roadStore();
     if (st && st->active) {
@@ -1519,6 +1536,7 @@ void renderFrame() {
     drawRain();
     drawSnow();
     drawLeaves();
+    if (g_view.photo) { s_frameN++; return; }        // the viewfinder: the world only
     if (g_view.view == VIEW_CHASE) drawChaseVehicle();
     drawWipers();                                   // before the dash, which hides their pivots
     if (g_view.view == VIEW_COCKPIT) drawCockpit();
@@ -1526,6 +1544,52 @@ void renderFrame() {
     drawHud();
     s_bob = 0.f;
     s_frameN++;
+}
+
+// ---- photo mode: the hero art, set into the scene ----
+static int s_phX0 = 0, s_phY0 = 0, s_phX1 = -1, s_phY1 = -1;      // what the overlay holds now
+void renderPhotoClear() {
+    uint16_t* o = overlayBuffer();
+    if (o && s_phX1 >= s_phX0) for (int y = s_phY0; y <= s_phY1; y++) memset(o + y * 320 + s_phX0, 0, (size_t)(s_phX1 - s_phX0 + 1) * 2);
+    s_phX1 = -1;
+    overlayEnable(false);
+}
+bool renderPhotoCompose(const PhotoArt& a) {
+    uint16_t* o = overlayBuffer();
+    if (!o || !a.px) return false;
+    renderPhotoClear();
+    float sx, sy, d;
+    if (!renderProject(a.x, a.y, a.z, sx, sy, d)) return false;
+    uint8_t zc = zcode(d);
+    // its shadow on the ground (the world, darkened)
+    int scx = (int)sx, scy = (int)sy, srx = (int)(a.shadowW * 0.5f * F / d), sry = srx / 5 + 1;
+    for (int y = -sry; y <= sry; y++) for (int x = -srx; x <= srx; x++) {
+        if ((x * x) * sry * sry + (y * y) * srx * srx > srx * srx * sry * sry) continue;
+        int X = scx + x, Y = scy + y;
+        if ((unsigned)X < (unsigned)W && (unsigned)Y < (unsigned)H && zb[Y * W + X] + 1 >= zc) fb[Y * W + X] = s_refl[s_refl[fb[Y * W + X]]];
+    }
+    // the art: its foot on the ground point, at full resolution, lit, behind anything nearer
+    int ox = (int)lroundf(sx * 2.f) - a.w / 2, oy = (int)lroundf(sy * 2.f) - a.h;
+    float lr = s_artLit[0], lg = s_artLit[1], lb = s_artLit[2];
+    bool any = false;
+    for (int y = 0; y < a.h; y++) {
+        int Y = oy + y;
+        if ((unsigned)Y >= 240u) continue;
+        for (int x = 0; x < a.w; x++) {
+            int X = ox + x;
+            if ((unsigned)X >= 320u) continue;
+            uint16_t p = a.px[y * a.w + (a.mirror ? a.w - 1 - x : x)];
+            if (!p) continue;
+            if (zb[(Y >> 1) * W + (X >> 1)] + 2 < zc) continue;            // grass, a tree, a rock in front of it
+            int R = (int)(((p >> 11) & 31) * lr), G = (int)(((p >> 5) & 63) * lg), B = (int)((p & 31) * lb);
+            uint16_t q = (uint16_t)((clampi(R, 0, 31) << 11) | (clampi(G, 0, 63) << 5) | clampi(B, 0, 31));
+            o[Y * 320 + X] = q ? q : 0x0821;
+            any = true;
+        }
+    }
+    s_phX0 = clampi(ox, 0, 319); s_phX1 = clampi(ox + a.w - 1, 0, 319); s_phY0 = clampi(oy, 0, 239); s_phY1 = clampi(oy + a.h - 1, 0, 239);
+    overlayEnable(true);
+    return any;
 }
 
 const uint8_t* frameBuffer() { return fb; }

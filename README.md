@@ -10,14 +10,23 @@ ahead and forgotten behind: coherent, never stored.
 |---|---|
 | Tilt left / right | Steer |
 | Tip the top away | Throttle |
-| Pull the top back | Brake. Hold it at a standstill to engage reverse; in reverse it drives backwards. Throttle returns to drive. |
-| **A** (left button) | Horn (deer bolt) |
+| Pull the top back | Brake. Hold it at a standstill to engage reverse; throttle returns to drive. |
+| **A** (left button) | Horn (deer bolt). **Stopped: the camera** (photo mode). |
 | **B** tap | Change view: cockpit, eye level, chase |
 | **B** hold (0.65 s) | Re-centre the tilt |
 | **C** (right button) | Handbrake (hold) |
 | Touch the picture | Use what's in front of you (the dealership) |
+| **Double-tap the picture** | Stuck? Back on the road |
 | Hold the picture 1.5 s | Mute / unmute |
 | Bike in the air | Tip forward / back to pitch the bike for the landing |
+
+**Photo mode** (stopped, press A): the screen is a viewfinder. Tilt and tip turn and tilt the camera. **A** takes the
+photo and moves to the next angle, **C** changes the angle, **B** goes back to driving. Angles: the car's side (your
+side-view drawing), behind it (the rear drawing), the other side (mirrored), and a free look around from the driver's
+seat. Photos are saved to the SD card as `/images/rally/rally_NNNN.mg` (MG01, 320 x 240 RGB565, as MantisPlanet).
+
+**Saves** go to the SD card, `/rally_saves/progress.bin` (written to a temporary file first, with the previous save
+kept as `progress.bak`), on events that matter and every 5 miles. Without a card, the internal flash is used, rarely.
 
 The A/B/C buttons are zones of the touch panel below the picture; touches there are buttons only (the old build counted
 them as screen touches too, which is why holding a button muted the sound). Steering direction was also inverted; fixed.

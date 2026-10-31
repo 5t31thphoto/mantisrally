@@ -6,14 +6,16 @@
 //   A (left button)    horn             B tap  change view (cockpit / eye level / chase)   B hold  re-centre the tilt
 //   C (right button)   handbrake (hold)  in the air on the bike: tip forward / back to pitch the bike
 //   touch the screen   use what's in front of you (the dealership)        hold the screen 1.5 s  mute
+//   double-tap the screen   stuck? back on the road
 // The A/B/C buttons are zones of the touch panel below the picture: touches there are buttons only, never taps
 // or the mute hold.
 
 namespace mantis {
 
 struct HelmEvents {
-    bool horn, view, recenter, mute;
+    bool horn, view, recenter, mute, cPress;
     bool tap; int tapX, tapY;      // panel pixels (320x240)
+    bool doubleTap;                // two deliberate taps in quick succession
 };
 
 void  helmInit();

@@ -51,11 +51,11 @@ int main() {
   tilt(0, 0);
   setup();
   uint32_t seed = 0x5707E;
-  universeInit(seed); journeyInit(seed); journeyForce(B_AUTUMN, B_AUTUMN, 0.f); terrainInit(seed); sceneInit(seed); fieldInit(seed);
+  universeInit(seed); journeyInit(seed); journeyForce(B_LAKES, B_LAKES, 0.f); terrainInit(seed); sceneInit(seed); fieldInit(seed);
   g_prog.owned = 1; g_prog.current = V_STI; switchVehicle(V_STI); placeOnRoad(false);
   g_prog.wallet[V_STI] = 24.f;                              // enough miles in the STI for the Jeep
   g_prog.view = VIEW_CHASE; msgT = 0;
-  setTimeOfDay(0.36f, 0, 0);
+  setTimeOfDay(0.45f, 0, 0);
   int i = 0;
   // drive (unrecorded) until a store is placed ahead of us
   for (int k = 0; k < 30 * 600; k++) {
@@ -63,8 +63,8 @@ int main() {
     if (k < 15) { st = 0; tip = 0; }
     tilt(fmaxf(-1.f, fminf(1.f, st)), tip); frame(false, i++);
     if ((k % 300) == 0) roadRequestStore();
-    const Store* s = roadStore();
-    if (s->active) { float d = hypotf(s->x - car.x, s->z - car.z); float ah = (s->x - car.x) * cosf(car.yaw) + (s->z - car.z) * sinf(car.yaw); if (d < 330.f && ah > 250.f) break; }
+    const MotorSign* ms = roadMotorSign();
+    if (ms->active) { float ah = (ms->x - car.x) * cosf(car.yaw) + (ms->z - car.z) * sinf(car.yaw); if (ah > 120.f && ah < 220.f) break; }
   }
   printf("store found after %.2f miles\n", distance / 1609.f);
   // 1. the store on the side of the road: drive up to it
@@ -72,8 +72,8 @@ int main() {
   bool roadRec = false;
   const Store* s = roadStore();
   int phase = 0, stopped = 0;
-  for (int k = 0; k < 30 * 30 && phase < 2; k++) {
-    float d = hypotf(s->x - car.x, s->z - car.z);
+  for (int k = 0; k < 30 * 40 && phase < 2; k++) {
+    float d = s->active ? hypotf(s->x - car.x, s->z - car.z) : 1e9f;
     float st = follow(10 + car.speed * 0.7f), tip;
     if (d > 130.f) tip = car.speed < 18.f ? 0.6f : 0.1f;
     else {                                                  // ease off, then pull onto the lot beside the store
@@ -86,7 +86,7 @@ int main() {
       tip = car.speed > want + 1.f ? -0.8f : (car.speed < want - 1.f ? 0.4f : 0.f);
       if (want < 1.f) tip = -0.7f;
     }
-    if (!roadRec && d < 230.f) roadRec = true;
+    roadRec = true;
     tilt(fmaxf(-1.f, fminf(1.f, st)), tip); frame(roadRec || phase > 0, i++);
     if (storeActive()) { stopped++; if (stopped > 30) phase = 2; }
   }

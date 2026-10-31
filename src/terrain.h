@@ -33,6 +33,7 @@ struct Junction {
 
 struct RoadSign { bool active; float x, z, yaw; int8_t side; };   // the junction's sign
 struct Store    { bool active; float x, z, yaw; float s; };      // MANTIS MOTORS (a lot beside the road)
+struct MotorSign { bool active; float x, z; int8_t travelSide; };  // the arrow, a quarter mile before it
 
 // Baked cell
 struct Cell {
@@ -82,6 +83,7 @@ bool roadRecover(float& x, float& z, float& yaw, float edge);
 const Junction* roadJunction();
 const RoadSign* roadSign();
 const Store* roadStore();
+const MotorSign* roadMotorSign();
 void roadRequestStore();                     // the game wants a store soon (affordable vehicle etc.)
 bool roadJunctionEvent(bool& tookArm);       // true once when a fork is decided
 float roadDistanceTo(float x, float z);      // metres to the nearest road (big if none)

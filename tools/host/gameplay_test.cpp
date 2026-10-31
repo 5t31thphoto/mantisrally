@@ -26,7 +26,7 @@ int main() {
   RoadHit h; roadNearest(0, 0, h);
   float x = 0, z = 0, yaw = h.yaw, dist = 0;
   int forks = 0, arms = 0, biomes = 0, arrivals = 0, stores = 0; uint16_t seen = 0;
-  bool storeSeen = false; float maxGrade = 0.f; float lastY = 0.f; bool first = true; int jumpSites = 0; float lastJump = -1e9f;
+  bool storeSeen = false; float maxGrade = 0.f; float lastY = 0.f; bool first = true; int jumpSites = 0; float siteX[64], siteZ[64];
   const float dt = 0.1f, v = 30.f;
   for (int step = 0; step < (int)(40.f * MILE / (v * dt)); step++) {
     RoadHit r;
@@ -59,7 +59,11 @@ int main() {
     float y = terrainHeight(x, z);
     CHECK(std::isfinite(y), "height NaN at %.1f mi", dist / MILE);
     if (!first) { float g = fabsf(y - lastY) / fmaxf(moved, 0.1f); if (g > maxGrade && fabsf(r.across) < r.half) maxGrade = g;
-      if (g > 0.6f && fabsf(r.across) < r.half && dist - lastJump > 0.2f * MILE) { jumpSites++; lastJump = dist; } }
+      if (g > 0.6f && fabsf(r.across) < r.half) {           // count places, not passes (the test driver can loop)
+        bool known = false;
+        for (int q = 0; q < jumpSites && q < 64; q++) if (hypotf(siteX[q] - x, siteZ[q] - z) < 80.f) known = true;
+        if (!known && jumpSites < 64) { siteX[jumpSites] = x; siteZ[jumpSites] = z; jumpSites++; }
+      } }
     lastY = y; first = false;
     bool tookArm;
     if (roadJunctionEvent(tookArm)) { forks++; if (tookArm) arms++; }

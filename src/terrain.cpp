@@ -67,8 +67,12 @@ struct Gen {
 static Gen s_gF, s_gB, s_gA;
 
 static void rebakeAround(float x, float z, float r);
+static void rebakeLater(float x, float z, float r);
+static void rebakeCancel();
 static void avoidSelf(struct Gen& g, const RoadNode& n, int dir);
 static Junction s_junc;
+static MotorSign s_mmSign;
+static bool s_storePending = false;
 static RoadSign s_sign;
 static Store s_store;
 static bool s_storeReq = false;
@@ -179,6 +183,7 @@ static void startRoad(float x, float z, float yaw) {
     s_gF.segLeft = s_gB.segLeft = 60.f;
     s_carIdx = 0;
     s_junc.active = false; s_sign.active = false; s_armN = 0;
+    s_mmSign.active = false; s_storePending = false; rebakeCancel();
 }
 
 int roadCount() { return s_cnt; }
@@ -335,11 +340,35 @@ static void spawnJunction(int dir) {
     }
 }
 
+// The MANTIS MOTORS arrow sign goes up first; the store follows a quarter mile further on, on the same side.
+static float s_storeAtS = 0.f;
+static int s_storeSide = 1, s_storeDir = 1;                // side in the road's front frame; the end it grows at
+const MotorSign* roadMotorSign() { return &s_mmSign; }
+static void spawnStoreSign(int dir) {
+    int si = dir > 0 ? s_cnt - 1 : 0;
+    const RoadNode& n = nodeAt(si);
+    Gen& g = dir > 0 ? s_gF : s_gB;
+    s_storeSide = (g.rng & 4) ? 1 : -1;
+    s_storeDir = dir;
+    float half = n.half20 * 0.05f;
+    float rx = -sinf(n.yaw), rz = cosf(n.yaw);
+    s_mmSign.active = true;
+    s_mmSign.x = n.x + rx * s_storeSide * (half + 2.8f);
+    s_mmSign.z = n.z + rz * s_storeSide * (half + 2.8f);
+    s_mmSign.travelSide = (int8_t)(s_storeSide * dir);      // + : the store is on your right as you drive toward it
+    s_storePending = true;
+    s_storeAtS = n.s + dir * 402.f;                         // a quarter mile on
+    g.sinceStore = 0.f; g.nextStore = MILE * (3.5f + 2.5f * hashf(g.rng + 31));
+    s_storeReq = false;
+    rebakeAround(s_mmSign.x, s_mmSign.z, 6.f);
+}
+
 static void spawnStore(int dir) {
     int si = dir > 0 ? s_cnt - 1 : 0;
     RoadNode& n = nodeAt(si);
     Gen& g = dir > 0 ? s_gF : s_gB;
-    int side = (g.rng & 4) ? 1 : -1;
+    int side = s_storeSide;
+    s_storePending = false;
     n.flags |= RN_STORE; n.side = (uint8_t)(side > 0 ? 1 : 2);
     float half = n.half20 * 0.05f;
     float rx = -sinf(n.yaw), rz = cosf(n.yaw);
@@ -347,9 +376,8 @@ static void spawnStore(int dir) {
     s_store.x = n.x + rx * side * (half + 12.f);           // right beside the road
     s_store.z = n.z + rz * side * (half + 12.f);
     s_store.yaw = n.yaw;
-    g.sinceStore = 0.f; g.nextStore = MILE * (3.5f + 2.5f * hashf(g.rng + 31));
-    s_storeReq = false;
-    rebakeAround(s_store.x, s_store.z, 48.f);               // its gravel lot and a clear frontage, even if that land was already dreamt
+    (void)g;
+    rebakeLater(s_store.x, s_store.z, 48.f);                // its gravel lot and a clear frontage (a slice per frame)
 }
 
 // The road never crosses itself: if a new node comes near the road's own body, it bends away.
@@ -387,10 +415,14 @@ static void extend(int dir, bool facing) {
     rebakeAround(n.x, n.z, n.half20 * 0.05f + 10.f);           // the road may wind back into land already dreamt
     if (!facing) return;
     bool calm = fabsf(g.curv) < 1.f / 140.f && g.pending == 0 && g.seg != SEG_HAIRPIN;
+    if (s_storePending) {                                   // the sign is up: the store comes a quarter mile on
+        if (dir == s_storeDir && (n.s - s_storeAtS) * dir >= 0.f && calm) spawnStore(dir);
+        return;                                             // (and no fork between a sign and its store)
+    }
     if (!s_junc.active && g.sinceJunc > g.nextJunc && calm) spawnJunction(dir);
     // the store only goes on the road you are actually on: never while a fork ahead is undecided
-    else if (!s_store.active && calm && g.sinceStore > g.nextStore * (s_storeReq ? 0.35f : 1.f)
-             && (!s_junc.active || (s_junc.decided && fabsf(n.s - s_junc.s) > 400.f))) spawnStore(dir);
+    else if (!s_store.active && !s_mmSign.active && calm && g.sinceStore > g.nextStore * (s_storeReq ? 0.35f : 1.f)
+             && (!s_junc.active || (s_junc.decided && fabsf(n.s - s_junc.s) > 400.f))) spawnStoreSign(dir);
 }
 
 static void dropBack() { s_base = (s_base + 1) & RM; s_cnt--; s_carIdx--; }
@@ -526,6 +558,8 @@ static void bakeCell(Grid& g, int ci, int cj) {
         if (ra < 30.f && rl < 26.f) {
             RoadHit sh; float ly = road ? rh.y : h;
             if (roadNearest(s_store.x, s_store.z, sh, 80.f)) ly = sh.y;
+            // next to the road the lot meets the road at the road's own height (a sloping road leaves no step)
+            if (road) { float e = clampf((fabsf(across) - half) / 10.f, 0.f, 1.f); ly = rh.y + (ly - rh.y) * e; }
             float t = smooth01(fmaxf((ra - 18.f) / 12.f, (rl - 15.f) / 11.f));
             h = ly - 0.05f + (h - ly) * t; hX = ly + (hX - ly) * t; hZ = ly + (hZ - ly) * t;
             if (t < 0.05f) { mat = MAT_LOT; surf = SURF_GRAVEL; lot = true; }
@@ -631,6 +665,30 @@ static void rebakeIn(Grid& g, float x, float z, float r) {
     for (int j = j0; j <= j1; j++) for (int i = i0; i <= i1; i++) bakeCell(g, i, j);
 }
 static void rebakeAround(float x, float z, float r) { rebakeIn(s_near, x, z, r); rebakeIn(s_far, x, z, r); }
+// a big region (the dealership's lot) is rebuilt a slice per frame instead of all at once: no hitch
+struct Pending { bool on; float x, z, r; int row; };
+static Pending s_pend = {false, 0.f, 0.f, 0.f, 0};
+static void rebakeCancel() { s_pend.on = false; }
+static void rebakeLater(float x, float z, float r) { s_pend.on = true; s_pend.x = x; s_pend.z = z; s_pend.r = r; s_pend.row = 0; }
+static void rebakeStep() {
+    if (!s_pend.on) return;
+    const float strip = 6.f;                                  // metres of the region per frame
+    float z0 = s_pend.z - s_pend.r + s_pend.row * strip;
+    if (z0 > s_pend.z + s_pend.r) { s_pend.on = false; return; }
+    s_pend.row++;
+    Grid* gs[2] = {&s_near, &s_far};
+    for (Grid* gp : gs) {
+        Grid& g = *gp;
+        if (!g.c) continue;
+        int i0 = (int)floorf((s_pend.x - s_pend.r) * g.inv), i1 = (int)floorf((s_pend.x + s_pend.r) * g.inv);
+        int j0 = (int)floorf(z0 * g.inv), j1 = (int)floorf((z0 + strip) * g.inv) - 1;
+        if (j1 < j0) j1 = j0;
+        for (int j = j0; j <= j1; j++) {
+            if (j < g.oz || j >= g.oz + g.N) continue;
+            for (int i = i0; i <= i1; i++) if (i >= g.ox && i < g.ox + g.N) bakeCell(g, i, j);
+        }
+    }
+}
 
 static void gridMax(Grid& g) {
     if (!g.c) return;
@@ -660,6 +718,7 @@ void terrainInit(uint32_t seed) {
     if (!s_rn) s_rn = (RoadNode*)memFast(sizeof(RoadNode) * RN);
     if (!s_arm) s_arm = (RoadNode*)memSlow(sizeof(RoadNode) * ARM_MAX);
     memset(&s_junc, 0, sizeof(s_junc)); memset(&s_sign, 0, sizeof(s_sign)); memset(&s_store, 0, sizeof(s_store));
+    memset(&s_mmSign, 0, sizeof(s_mmSign)); s_storePending = false;
     gridInit(s_near, 96, 2.5f);
     gridInit(s_far, 64, 8.f);
     s_lagYaw = 0.f;
@@ -731,9 +790,14 @@ void terrainUpdate(float carX, float carZ, float carYaw, float speed, float dt) 
         float dx = carX - s_store.x, dz = carZ - s_store.z;
         if (dx * dx + dz * dz > 750.f * 750.f) s_store.active = false;
     }
+    if (s_mmSign.active) {
+        float dx = carX - s_mmSign.x, dz = carZ - s_mmSign.z;
+        if (dx * dx + dz * dz > 900.f * 900.f) { s_mmSign.active = false; s_storePending = false; }
+    }
     // ---- caches ----
     float nx, nz, fx, fz;
     windowCentres(carX, carZ, nx, nz, fx, fz);
+    rebakeStep();
     gridScroll(s_near, nx, nz, 200);
     gridScroll(s_far, fx, fz, 72);
     if ((s_frame & 31) == 0) gridMax(s_near);

@@ -29,6 +29,8 @@ struct ViewInfo {
     const char* juncL; const char* juncR; float juncA;
     float storeA;                  // "MANTIS MOTORS AHEAD"
     bool showFps; int fps;
+    // photo mode: the camera is placed by photo.cpp; no HUD, no car sprite, no cockpit
+    bool photo; float pX, pY, pZ, pYaw, pPitch;
 };
 extern ViewInfo g_view;
 
@@ -42,6 +44,11 @@ void renderWater(float strength);               // spray on the glass
 void renderDeerSplat();                         // light-red specks on the glass, then one slow wipe
 bool renderWipeEvent(bool& deerWipe);           // a wiper sweep just started (for its sound)
 
+// Photo mode: hero art (native RGB565, 0 = clear) set into the full-resolution overlay where the car stands, lit by
+// the scene, behind anything nearer the camera, with its shadow on the ground. Returns false if it isn't in view.
+struct PhotoArt { const uint16_t* px; int w, h; bool mirror; float x, y, z; float shadowW; };
+bool renderPhotoCompose(const PhotoArt& a);
+void renderPhotoClear();
 const uint8_t*  frameBuffer();
 bool            renderDepthFast();       // the depth buffer got internal RAM
 extern const char* g_memNote;          // shown under the FPS readout

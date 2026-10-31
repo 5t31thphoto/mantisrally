@@ -22,11 +22,11 @@ enum : uint8_t {
 };
 
 // Template pixel: high nibble material, low nibble shade (0..15). Material 0 = clear.
-enum : uint8_t { TM_NONE = 0, TM_LEAF, TM_LEAF2, TM_BARK, TM_ROCK, TM_SNOW, TM_FLOWER, TM_WALL, TM_ROOF, TM_GLASS, TM_SIGN, TM_SIGNTXT, TM_WHITE };
+enum : uint8_t { TM_NONE = 0, TM_LEAF, TM_LEAF2, TM_BARK, TM_ROCK, TM_SNOW, TM_FLOWER, TM_WALL, TM_ROOF, TM_GLASS, TM_SIGN, TM_SIGNTXT, TM_WHITE, TM_SIGNY, TM_INK };
 struct Tpl { uint8_t w, h; uint8_t* px; int8_t ax; };   // ax: anchor column (base)
 
 enum : uint8_t { T_PINE0 = 0, T_PINE1, T_PINE2, T_PINESNOW, T_BROAD0, T_BROAD1, T_REDWOOD, T_BUSH, T_CACTUS, T_SNAG, T_BOULDER,
-                 T_FLOWERS, T_STORE, T_DEER0, T_DEER1, T_DEER2, T_DEER3, T_TPL_N };
+                 T_FLOWERS, T_STORE, T_DEER0, T_DEER1, T_DEER2, T_DEER3, T_MMSIGN, T_MMSIGN_L, T_TPL_N };
 const Tpl& tpl(uint8_t id);
 
 

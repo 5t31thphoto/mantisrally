@@ -145,6 +145,12 @@ void natureImpact(uint8_t kind, float st) {
             for (int i = 0; i < 4; i++) grain(0.25f + i * (0.06f + rng.uni() * 0.08f), 0, 3000.f + rng.uni() * 1500.f, 2500.f, 2.f, 0.f, 0.01f, 0.08f * a * (1.f - i * 0.2f), 0.25f);
             break;
         }
+        case IMP_SHUTTER:                                     // ka-chunk: the mirror flips up, the shutter, the mirror back
+            grain(0.f, 0, 4200.f, 3000.f, 1.6f, 0.f, 0.006f, 0.30f, 0.05f);
+            grain(0.004f, 0, 1100.f, 800.f, 2.5f, 0.f, 0.022f, 0.20f, 0.05f);
+            grain(0.075f, 0, 3600.f, 2800.f, 1.6f, 0.f, 0.006f, 0.24f, 0.05f);
+            grain(0.079f, 0, 900.f, 700.f, 2.5f, 0.f, 0.03f, 0.16f, 0.05f);
+            break;
         case IMP_WIPE:                                        // the wiper: a soft rubber swish across the glass
             grain(0.f, 0, 1500.f, 900.f, 0.9f, 0.18f, 0.16f, 0.035f, 0.1f);
             break;

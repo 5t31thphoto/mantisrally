@@ -1,6 +1,7 @@
 #pragma GCC optimize("Os")
 #include "progress.h"
 #include "journey.h"
+#include "storage.h"
 #include <string.h>
 #ifndef HOST
 #include <Preferences.h>
@@ -13,26 +14,40 @@ static float s_unsaved = 0.f;
 static const uint32_t MAGIC = 0x4D52414Cu;   // "MRAL"
 struct Blob { uint32_t magic; Progress p; };
 
-void progressInit() {
+// Saved to the SD card (/rally_saves); the internal flash is only a fallback when there is no card.
+// Saves happen on events that matter (buying, switching, a new biome, the off-road switch, leaving the store) and
+// every 5 miles of driving: the card is never hammered, and the flash almost never written.
+static void fresh() {
     memset(&g_prog, 0, sizeof(g_prog));
     g_prog.owned = 1u << V_STI; g_prog.current = V_STI; g_prog.view = 0;
+}
+
+void progressInit() {
+    fresh();
+    Blob b;
+    bool got = storageOk() && storageLoad(&b, sizeof(b)) && b.magic == MAGIC;
 #ifndef HOST
-    Preferences pr;
-    if (pr.begin("mrally", true)) {
-        Blob b;
-        if (pr.getBytes("prog", &b, sizeof(b)) == sizeof(b) && b.magic == MAGIC) g_prog = b.p;
-        pr.end();
+    if (!got) {
+        Preferences pr;
+        if (pr.begin("mrally", true)) {
+            got = pr.getBytes("prog", &b, sizeof(b)) == sizeof(b) && b.magic == MAGIC;
+            pr.end();
+        }
     }
 #endif
+    if (got) g_prog = b.p;
     g_prog.owned |= 1u << V_STI;
     if (!(g_prog.owned & (1u << g_prog.current))) g_prog.current = V_STI;
 }
 
 void progressSave() {
+    Blob b; b.magic = MAGIC; b.p = g_prog;
+    if (!storageSave(&b, sizeof(b))) {
 #ifndef HOST
-    Preferences pr;
-    if (pr.begin("mrally", false)) { Blob b; b.magic = MAGIC; b.p = g_prog; pr.putBytes("prog", &b, sizeof(b)); pr.end(); }
+        Preferences pr;                                  // no card: the flash, rarely
+        if (pr.begin("mrally", false)) { pr.putBytes("prog", &b, sizeof(b)); pr.end(); }
 #endif
+    }
     s_unsaved = 0.f;
 }
 
@@ -42,7 +57,7 @@ void progressDrive(float m) {
     g_prog.miles[g_prog.current] += mi;
     g_prog.wallet[g_prog.current] += mi;
     s_unsaved += mi;
-    if (s_unsaved > 0.25f) progressSave();
+    if (s_unsaved > 5.f) progressSave();               // every 5 miles of driving
 }
 
 int progressNextLocked() {
