@@ -1,5 +1,6 @@
 #pragma once
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #ifndef HOST
 #include <esp_heap_caps.h>
@@ -23,6 +24,15 @@ inline void* memFast(size_t n) {
 #else
     void* p = heap_caps_calloc(1, n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     return p ? p : heap_caps_calloc(1, n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+}
+// true when p is in internal RAM (false: it landed in PSRAM)
+inline bool memIsFast(const void* p) {
+#ifdef HOST
+    (void)p; return true;
+#else
+    uintptr_t a = (uintptr_t)p;                   // the ESP32 maps external PSRAM at 0x3F800000-0x3FBFFFFF
+    return p && !(a >= 0x3F800000u && a < 0x3FC00000u);
 #endif
 }
 }

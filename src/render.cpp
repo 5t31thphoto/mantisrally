@@ -16,6 +16,14 @@
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
+#if !defined(HOST) && !defined(MR_NO_IRAM)
+#include <esp_attr.h>
+#define MR_HOT IRAM_ATTR        // inner loops in instruction RAM (no flash-cache stalls), as MantisPlanet does
+#define MR_FAST DRAM_ATTR
+#else
+#define MR_HOT
+#define MR_FAST
+#endif
 
 namespace mantis {
 
@@ -37,7 +45,7 @@ static uint8_t* s_cock = nullptr;          // decoded cockpit, 0 = glass
 static uint8_t* s_wheelMask = nullptr;     // cockpit pixels that are the steering wheel
 static float s_bob = 0.f;
 
-static const uint8_t BAYER[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
+static MR_FAST uint8_t BAYER[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
 static inline float dith(int x, int y) { return (BAYER[((y & 3) << 2) | (x & 3)] + 0.5f) * (1.f / 16.f); }
 static inline float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b : v); }
 static inline int clampi(int v, int a, int b) { return v < a ? a : (v > b ? b : v); }
@@ -425,7 +433,7 @@ static inline uint8_t groundPix(int x, int y, float wx, float wz, float a, float
     return c;
 }
 
-static void drawTerrain(float zFar) {
+MR_HOT static void drawTerrain(float zFar) {
     const Grid& gN = terrainNear();
     const Grid& gF = terrainFar();
     float maxH = fmaxf(gN.maxH, gF.maxH);
@@ -495,30 +503,62 @@ static float hFar[W + 2], hNear[W + 2];
 static float s_skyPow[80], s_skyTT[80];
 static float s_sunX, s_sunY, s_sunVis, s_lowSun;
 
-static void computePanorama() {
+// The ranges live in a ring around the whole horizon (1024 steps), refreshed a slice a frame and looked up by
+// heading: turning costs nothing, and the land only morphs slowly with distance.
+static constexpr int PAN_N = 1024;
+static float* s_panFar = nullptr;
+static float* s_panNear = nullptr;
+static int s_panCur = 0;
+static bool s_panFull = true;
+static float s_panPeaks = -1.f; static bool s_panMesa = false; static float s_panMorph = 0.f;
+static void panoramaRefresh(int count) {
     const Scene& sc = g_scene;
     const Biome& A = biome(sc.biomeA); const Biome& B = biome(sc.biomeB);
     float peaks = A.peaks + (B.peaks - A.peaks) * sc.blend;
     bool mesa = (sc.blend < 0.5f ? sc.biomeA : sc.biomeB) == B_CANYON;
     float morph = sc.distance * 0.00015f;
-    float lift = (cy - journeyBase(cx, cz)) * F / 1800.f;
-    for (int x = -1; x <= W; x++) {
-        int xi = clampi(x, 0, W - 1);
-        float a = azC[xi] + (x - xi) / F;
-        float u = angU(a, 12);
+    for (int n = 0; n < count; n++) {
+        int k = s_panCur; s_panCur = (s_panCur + 1) & (PAN_N - 1);
+        float u = k * (12.f / PAN_N);
         float mass = fbmP(u, morph, 12, 3, worldSeed() + 0x51);                   // broad massifs
         float r = 1.f - fabsf(2.f * fbmP(u * 3.f, morph + 3.f, 36, 2, worldSeed() + 0x52) - 1.f);   // ridged detail
         float hf = (mass - 0.38f) * 1.6f + r * r * 0.35f * mass;
         hf = fmaxf(0.f, hf) * peaks * 62.f;
         if (mesa) hf = floorf(hf / 9.f) * 9.f + 4.f * clampf(fmodf(hf, 9.f) - 6.f, 0.f, 1.f);
         float f2 = fbmP(u * 2.f, morph * 1.6f, 24, 3, worldSeed() + 0x53);
-        float hn = (f2 - 0.42f) * (10.f + peaks * 26.f);
+        s_panFar[k] = hf;
+        s_panNear[k] = (f2 - 0.42f) * (10.f + peaks * 26.f);
+    }
+}
+static void computePanorama() {
+    if (!s_panFar) { s_panFar = (float*)memSlow(PAN_N * sizeof(float)); s_panNear = (float*)memSlow(PAN_N * sizeof(float)); s_panFull = true; }   // read ~160x a frame: PSRAM is fine
+    {   const Scene& sc = g_scene;
+        const Biome& A = biome(sc.biomeA); const Biome& B = biome(sc.biomeB);
+        float peaks = A.peaks + (B.peaks - A.peaks) * sc.blend;
+        bool mesa = (sc.blend < 0.5f ? sc.biomeA : sc.biomeB) == B_CANYON;
+        float morph = sc.distance * 0.00015f;
+        if (fabsf(peaks - s_panPeaks) > 0.01f || mesa != s_panMesa || fabsf(morph - s_panMorph) > 0.02f) s_panFull = true;
+        s_panPeaks = peaks; s_panMesa = mesa; s_panMorph = morph;
+    }
+    panoramaRefresh(s_panFull ? PAN_N : PAN_N / 8);
+    s_panFull = false;
+    float lift = (cy - journeyBase(cx, cz)) * F / 1800.f;
+    const float toIdx = PAN_N / 6.2831853f;
+    for (int x = -1; x <= W; x++) {
+        int xi = clampi(x, 0, W - 1);
+        float a = azC[xi] + (x - xi) / F;
+        float f = a * toIdx;
+        f -= PAN_N * floorf(f / PAN_N);
+        int i0 = (int)f; float t = f - i0;
+        int i1 = (i0 + 1) & (PAN_N - 1); i0 &= PAN_N - 1;
+        float hf = s_panFar[i0] + (s_panFar[i1] - s_panFar[i0]) * t;
+        float hn = s_panNear[i0] + (s_panNear[i1] - s_panNear[i0]) * t;
         hFar[x + 1] = fmaxf(0.f, hf * F / 96.f - lift);
         hNear[x + 1] = fmaxf(0.f, hn * F / 96.f - lift * 2.f);
     }
 }
 
-static void drawRidge(const float* hh, int far, float snowLine) {
+MR_HOT static void drawRidge(const float* hh, int far, float snowLine) {
     for (int x = 0; x < W; x++) {
         float h = hh[x + 1];
         int baseY = (int)horX[x] + (far ? 1 : 3);
@@ -544,7 +584,7 @@ static void drawRidge(const float* hh, int far, float snowLine) {
     }
 }
 
-static void drawSkyAndPanorama() {
+MR_HOT static void drawSkyAndPanorama() {
     const Scene& sc = g_scene;
     computePanorama();
     // fill between the far terrain and the horizon with distant hills
@@ -615,16 +655,39 @@ static void drawSkyAndPanorama() {
     }
 }
 
-static void drawClouds() {                                 // Planet's banded pixel clouds
+static constexpr int CL_N = 512, CL_R = 26;
+static uint8_t* s_cl = nullptr;                // cloud density around the horizon [angle][row]
+static int s_clCur = 0;
+static bool s_clFull = true;
+static void cloudRefresh(int count) {
+    const Scene& sc = g_scene;
+    for (int n = 0; n < count; n++) {
+        int k = s_clCur; s_clCur = (s_clCur + 1) % CL_N;
+        float u = k * (36.f / CL_N);
+        for (int r = 0; r < CL_R; r++) {
+            float v = r * 0.15f + sc.distance * 0.001f + s_t * 0.004f;
+            float nn = (tex((int)(u * 3.556f), (int)(v * 8.f)) * 0.62f + tex((int)(u * 7.11f) + 21, (int)(v * 16.f) + 9) * 0.38f) * (1.f / 255.f);
+            nn = (nn - 0.5f) * 1.5f + 0.5f;
+            s_cl[k * CL_R + r] = (uint8_t)clampi((int)(nn * 255.f), 0, 255);
+        }
+    }
+}
+MR_HOT static void drawClouds() {                                 // Planet's banded pixel clouds
     const Scene& sc = g_scene;
     if (sc.cloud < 0.04f) return;
     const int CR = 26;
     float thresh = 0.92f - 0.62f * sc.cloud + 0.12f * s_night * (1.f - sc.cloud);
     float drift = s_t * 0.006f * (1.f + 2.f * sc.wind);
     float centre = CR * (0.42f + 0.2f * sc.storm);
+    if (!s_cl) { s_cl = (uint8_t*)memSlow(CL_N * CL_R); s_clFull = true; }   // read ~2,000x a frame: PSRAM is fine
+    if (!s_cl) return;
+    cloudRefresh(s_clFull ? CL_N : CL_N / 8);
+    s_clFull = false;
+    const float toIdx = CL_N / 6.2831853f;
     for (int x = 0; x < W; x += 2) {
         float a = azC[x] + drift;
-        float u = angU(a, 36);
+        float fi = a * toIdx; fi -= CL_N * floorf(fi / CL_N);
+        const uint8_t* col = s_cl + ((int)fi % CL_N) * CL_R;
         float rel = wrapPi(sc.sunAz - a);
         float prox = s_sunVis / (1.f + rel * rel * 6.f);
         float prevD = -1.f;
@@ -633,11 +696,7 @@ static void drawClouds() {                                 // Planet's banded pi
             int yy = y + (int)(horX[x] - 70.f);
             if (yy < 0 || yy >= H) continue;
             float cyf = y * 0.5f;
-            if (!(y & 1) || n == 0.f) {
-                float v = cyf * 0.15f + sc.distance * 0.001f + s_t * 0.004f;
-                n = (tex((int)(u * 3.556f), (int)(v * 8.f)) * 0.62f + tex((int)(u * 7.11f) + 21, (int)(v * 16.f) + 9) * 0.38f) * (1.f / 255.f);
-                n = (n - 0.5f) * 1.5f + 0.5f;
-            }
+            n = col[y >> 1] * (1.f / 255.f);
             float prof = clampf(1.f - fabsf(cyf - centre) / (CR * 0.6f), 0.f, 1.f);
             float d = n * 0.8f + prof * 0.35f - thresh;
             float dn = d;
@@ -660,21 +719,38 @@ static void drawClouds() {                                 // Planet's banded pi
     }
 }
 
+static constexpr int STAR_N = 1000;
 static void drawNight() {
     const Scene& sc = g_scene;
     float n = s_night;
     if (n < 0.08f) return;
     uint32_t tw = (uint32_t)(s_t * 5.f);
-    for (int x = 0; x < W; x++) {
-        int su = (int)floorf(azC[x] * F);
-        for (int y = 0; y < H; y++) {
-            int i = y * W + x;
-            if (zb[i] != 255 || fb[i] >= P_CLOUD) continue;
-            int ry = (int)(horX[x]) - y;
-            uint32_t h = hash32((uint32_t)su * 0x9E3779B1u ^ (uint32_t)ry * 0x85EBCA77u ^ worldSeed());
-            uint32_t thr = (uint32_t)(n * 9.f * (1.f - sc.cloud * 0.8f) * (1.f + (sc.biomeA == B_TUNDRA ? 1.5f : 0.f)));
-            if ((h & 1023u) < thr) { int b = 3 + (int)((h >> 10) % 5); if ((hash32(h ^ tw) & 7u) == 0) b -= 3; fb[i] = (uint8_t)(P_SUN + clampi(b, 0, 7)); }
+    static float starAz[STAR_N], starEl[STAR_N]; static uint8_t starB[STAR_N]; static bool made = false;
+    if (!made) {
+        for (int k = 0; k < STAR_N; k++) {
+            uint32_t h = hash32((uint32_t)k * 2654435761u ^ 0x57A2u);
+            starAz[k] = (h & 0xFFFF) * (6.2831853f / 65536.f);
+            float e = ((h >> 16) & 0x3FF) / 1023.f;
+            starEl[k] = atanf(0.02f + e * 0.8f);              // evenly over the rows of sky, like the old per-pixel scan
+            starB[k] = (uint8_t)(3 + (hash32(h) % 5));
         }
+        made = true;
+    }
+    float dens = n * (1.f - sc.cloud * 0.8f) * (sc.biomeA == B_TUNDRA ? 1.f : 0.4f);
+    int count = (int)(STAR_N * clampf(dens, 0.f, 1.f));
+    for (int k = 0; k < count; k++) {
+        float rel = wrapPi(starAz[k] - cyaw);
+        if (fabsf(rel) > 0.8f) continue;
+        float sx = W * 0.5f + tanf(rel) * F;
+        int x = (int)sx;
+        if ((unsigned)x >= (unsigned)W) continue;
+        int y = (int)(horX[x] - tanf(starEl[k]) * F);
+        if ((unsigned)y >= (unsigned)H) continue;
+        int i = y * W + x;
+        if (zb[i] != 255 || fb[i] >= P_CLOUD) continue;
+        int b = starB[k];
+        if ((hash32((uint32_t)k ^ tw) & 7u) == 0) b -= 3;
+        fb[i] = (uint8_t)(P_SUN + clampi(b, 0, 7));
     }
     // moon
     float mrel = wrapPi(sc.sunAz + 3.14159f - cyaw);
@@ -734,7 +810,7 @@ static inline void putZ(int x, int y, uint8_t c, uint8_t zc) {
 }
 
 // a lit template, scaled. base: screen row of its foot at column sx.
-static void blitTpl(uint8_t id, float sx, float baseY, float pxH, float depth, bool mirror, bool alt, float headK) {
+MR_HOT static void blitTpl(uint8_t id, float sx, float baseY, float pxH, float depth, bool mirror, bool alt, float headK) {
     const Tpl& t = tpl(id);
     if (!t.px || pxH < 1.5f) return;
     float sc = pxH / t.h;
@@ -925,7 +1001,7 @@ static void drawParticles() {
 }
 
 // ================================================================================== reflections, weather
-static void reflectPass() {
+MR_HOT static void reflectPass() {
     const float t = s_t;
     for (int x = 0; x < W; x++) {
         for (int y = (int)horX[x] + 1; y < H; y++) {
@@ -1055,23 +1131,36 @@ static void drawMist() {
     }
 }
 
+static uint8_t* s_shaft = nullptr;            // 80x60 brighten chance, refreshed every other frame
+static float s_shaftSX = 0.f, s_shaftSY = 0.f;   // where the sun was when it was made
+static int s_frameN = 0;
 static void drawShafts() {
     const Scene& sc = g_scene;
     if (sc.beams < 0.12f || s_night > 0.6f || s_sunX < -400.f || s_sunX > W + 400.f) return;
-    float str = sc.beams * 0.45f;
-    for (int y = 0; y < H; y += 2) for (int x = 0; x < W; x += 2) {
-        float dx = x - s_sunX, dy = y - s_sunY;
-        if (dy < -6.f) continue;
-        float ang = fastAtan2(dy, dx);
-        float st = tex((int)(ang * 20.f + 64.f), (int)(s_t * 0.3f)) * (1.f / 255.f);
-        if (st < 0.56f) continue;
-        float dist = sqrtf(dx * dx + dy * dy);
-        float k = (st - 0.56f) * 2.3f * str * clampf(1.f - dist / 260.f, 0.f, 1.f);
-        for (int q = 0; q < 4; q++) {
-            int xx = x + (q & 1), yy = y + (q >> 1);
-            if (xx >= W || yy >= H) continue;
-            if (k > dith(xx, yy)) { int i = yy * W + xx; fb[i] = s_bright[fb[i]]; }
+    if (!s_shaft) { s_shaft = (uint8_t*)memFast(80 * 60); if (!s_shaft) return; memset(s_shaft, 0, 80 * 60); }
+    if (!(s_frameN & 1)) {
+        s_shaftSX = s_sunX; s_shaftSY = s_sunY;
+        float str = sc.beams * 0.45f;
+        for (int y = 0; y < H; y += 2) for (int x = 0; x < W; x += 2) {
+            float dx = x - s_sunX, dy = y - s_sunY;
+            uint8_t k8 = 0;
+            if (dy >= -6.f) {
+                float st = tex((int)(fastAtan2(dy, dx) * 20.f + 64.f), (int)(s_t * 0.3f)) * (1.f / 255.f);
+                if (st >= 0.56f) {
+                    float dist = sqrtf(dx * dx + dy * dy);
+                    float k = (st - 0.56f) * 2.3f * str * clampf(1.f - dist / 260.f, 0.f, 1.f);
+                    k8 = (uint8_t)clampi((int)(k * 255.f), 0, 255);
+                }
+            }
+            s_shaft[(y >> 1) * 80 + (x >> 1)] = k8;
         }
+    }
+    int ox = (int)lroundf(s_sunX - s_shaftSX), oy = (int)lroundf(s_sunY - s_shaftSY);   // the shafts move with the sun
+    for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
+        int mx = (x - ox) >> 1, my = (y - oy) >> 1;
+        if ((unsigned)mx >= 80u || (unsigned)my >= 60u) continue;
+        uint8_t k8 = s_shaft[my * 80 + mx];
+        if (k8 && k8 * (1.f / 255.f) > dith(x, y)) { int i = y * W + x; fb[i] = s_bright[fb[i]]; }
     }
 }
 
@@ -1141,10 +1230,17 @@ static void drawChaseVehicle() {
 }
 
 static float s_wheelAng = 0.f;
-static void drawCockpit() {
+static uint16_t* s_ckRun = nullptr;            // (start, length) pairs of opaque, non-wheel cockpit pixels
+static uint8_t* s_ckPix = nullptr;             // their palette indices, ready to copy
+static int s_ckRuns = 0;
+MR_HOT static void drawCockpit() {
     if (!s_cock) return;
     const art::CockArt& c = art::COCK_ART[g_view.vehicle];
-    for (int i = 0; i < W * H; i++) { uint8_t p = s_cock[i]; if (p && !s_wheelMask[i]) fb[i] = (uint8_t)(P_COCK + p); }
+    const uint8_t* src = s_ckPix;
+    for (int r = 0; r < s_ckRuns; r++) {
+        int st = s_ckRun[r * 2], len = s_ckRun[r * 2 + 1];
+        memcpy(fb + st, src, len); src += len;
+    }
     // the wheel turns with the steering
     if (c.wr > 0) {
         s_wheelAng += (g_view.steer * 1.6f - s_wheelAng) * clampf(g_scene.dt * 12.f, 0.f, 1.f);
@@ -1241,7 +1337,7 @@ static void drawHud() {
         hudText(W / 2 - font3Width(v.msg) / 2, 22, v.msg, P_HUD_W);
         if (v.sub) hudText(W / 2 - font3Width(v.sub) / 2, 30, v.sub, P_HUD_A);
     }
-    if (v.showFps) { snprintf(t, sizeof t, "%d", v.fps); hudText(2, H - 8, t, P_HUD_G); }
+    if (v.showFps) { snprintf(t, sizeof t, "%d", v.fps); hudText(2, H - 8, t, P_HUD_G); if (g_memNote) hudText(2, H - 15, g_memNote, g_memNote[4] == 'O' ? P_HUD_G : P_HUD_R); }
 }
 
 // ================================================================================== frame
@@ -1273,6 +1369,23 @@ void renderSetVehicle(uint8_t veh) {
         // behind the wheel: the dash's own colour
         for (int i = 0; i < W * H; i++) if (s_wheelMask[i]) { /* drawn rotated; the base shows dash */ }
         (void)bg;
+    }
+    // the overlay as runs in internal RAM (drawn every cockpit frame: no PSRAM reads)
+    if (!s_ckRun) { s_ckRun = (uint16_t*)memSlow(2400 * 2 * sizeof(uint16_t)); s_ckPix = (uint8_t*)memSlow(W * H / 2); }   // read straight through: PSRAM streams it
+    s_ckRuns = 0;
+    if (s_ckRun && s_ckPix) {
+        int np = 0;
+        for (int y = 0; y < H; y++) {
+            int x = 0;
+            while (x < W) {
+                int i = y * W + x;
+                if (!s_cock[i] || s_wheelMask[i]) { x++; continue; }
+                int st = i, len = 0;
+                while (x < W && s_cock[y * W + x] && !s_wheelMask[y * W + x] && np < W * H / 2) { s_ckPix[np++] = (uint8_t)(P_COCK + s_cock[y * W + x]); x++; len++; }
+                if (s_ckRuns < 2400) { s_ckRun[s_ckRuns * 2] = (uint16_t)st; s_ckRun[s_ckRuns * 2 + 1] = (uint16_t)len; s_ckRuns++; }
+                if (np >= W * H / 2) break;
+            }
+        }
     }
     // rows the dash covers solidly need no raycast
     for (int x = 0; x < W; x++) {
@@ -1345,9 +1458,12 @@ void renderFrame() {
     drawGlass();
     drawHud();
     s_bob = 0.f;
+    s_frameN++;
 }
 
 const uint8_t* frameBuffer() { return fb; }
+bool renderDepthFast() { return memIsFast(zb); }
+const char* g_memNote = nullptr;
 const uint16_t* framePalette565() { return pal565; }
 const uint8_t* framePaletteRGB() { return palRGB; }
 int frameBob() { return 0; }

@@ -166,6 +166,8 @@ static void displayTask(void*) {
 }
 #endif
 
+bool displayStreaming() { return s_stream; }
+
 void displayInit() {
 #ifndef MP_LEGACY_DISPLAY
 #ifndef HOST

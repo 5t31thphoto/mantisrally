@@ -16,6 +16,7 @@
 #include "audio.h"
 #include "progress.h"
 #include "store.h"
+#include "mem.h"
 
 using namespace mantis;
 
@@ -57,10 +58,21 @@ static void switchVehicle(uint8_t v) {
 }
 
 void setup() {
+    // Startup order is MantisPlanet / Seadiver's: internal RAM goes first come, first served.
     auto cfg = M5.config();
     cfg.internal_imu = true;
+    cfg.internal_spk = true;
+    cfg.internal_mic = false;                    // the Core2 shares one I2S port: the speaker keeps it
     M5.begin(cfg);
-    audioSpeakerBegin();
+    audioSpeakerBegin();                         // the speaker's DMA buffers before anything else allocates
+    audioBegin();                                // ...then the sound task's stack and buffers
+    displayInit();                               // ...then the LCD strips (DMA-capable internal RAM, or it falls back to slow PSRAM)
+    M5.Display.setRotation(1);
+    M5.Display.setBrightness(110);
+    if (M5.Imu.isEnabled()) {
+        M5.Imu.loadOffsetFromNVS();
+        for (int i = 0; i < 15; i++) { M5.Imu.update(); delay(4); }
+    }
     uint32_t seed = (uint32_t)(millis() ^ 0xC0FFEEu);
 #ifndef HOST
     seed ^= (uint32_t)esp_random();
@@ -69,14 +81,19 @@ void setup() {
     universeInit(seed);
     journeyInit(seed);
     journeySetVisited(g_prog.visited);
-    terrainInit(seed);
+    terrainInit(seed);                           // the near cache: the hottest memory in the game
     sceneInit(seed);
     fieldInit(seed);
     renderInit();
-    displayInit();
     helmInit();
-    audioBegin();
     hx::begin();
+    {   // did the hot buffers get fast internal RAM? (shown under the FPS readout)
+        static char note[40];
+        bool lcd = displayStreaming(), grid = memIsFast(terrainNear().c), depth = renderDepthFast(), snd = audioRunning();
+        if (lcd && grid && depth && snd) snprintf(note, sizeof note, "MEM OK");
+        else snprintf(note, sizeof note, "MEM SLOW:%s%s%s%s", lcd ? "" : " LCD", grid ? "" : " GRID", depth ? "" : " DEPTH", snd ? "" : " SOUND");
+        g_memNote = note;
+    }
     veh = g_prog.current;
     placeOnRoad(false);
     renderSetVehicle(veh);

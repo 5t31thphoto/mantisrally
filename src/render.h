@@ -41,6 +41,8 @@ void renderSplat(float strength);               // mud on the glass / lens
 void renderWater(float strength);               // spray on the glass
 
 const uint8_t*  frameBuffer();
+bool            renderDepthFast();       // the depth buffer got internal RAM
+extern const char* g_memNote;          // shown under the FPS readout
 const uint16_t* framePalette565();
 const uint8_t*  framePaletteRGB();
 int             frameBob();

@@ -2,6 +2,7 @@
 #include <stdint.h>
 namespace mantis {
 void displayInit();
+bool displayStreaming();                // true: the DMA strip pipeline (false: the slow PSRAM canvas fallback)
 // Expand the 160x120 indexed frame through the palette into a 320x240 canvas and hand it to
 // the core-0 push task; rendering of the next frame overlaps the LCD transfer.
 void displayPresent();
