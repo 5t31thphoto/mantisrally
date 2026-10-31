@@ -1,37 +1,28 @@
 #pragma once
 #include <stdint.h>
 
-// Rally helm: tilt steer, tip-to-throttle, C handbrake.
-//  * Lean left / right: steering rate (mass so a resting hand holds a line).
-//  * Tip top away: accelerate. Tip top toward you: brake / coast.
-//  * Slide finger: direct steer.
-//  * C click / hold: handbrake.
-//  * B: centre wheel + re-take neutral pose.
-//  * A: horn. B: recenter neutral pose. C: handbrake.
-//  * Touch drag: fine steering. Tap: scan roadside thing. Long touch: mute.
+// Controls. Hold the Core2 like a wheel:
+//   tilt left / right  steer            tip the top away  throttle        pull it back  brake (hold at a stop: reverse)
+//   A (left button)    horn             B tap  change view (cockpit / eye level / chase)   B hold  re-centre the tilt
+//   C (right button)   handbrake (hold)  in the air on the bike: tip forward / back to pitch the bike
+//   touch the screen   use what's in front of you (the dealership)        hold the screen 1.5 s  mute
+// The A/B/C buttons are zones of the touch panel below the picture: touches there are buttons only, never taps
+// or the mute hold.
 
 namespace mantis {
 
 struct HelmEvents {
-    bool tap; int tapX, tapY;
-    bool longPress;
-    bool aClick, aHold, bClick, bHold, cClick, cHold;
-    bool anyButton;
+    bool horn, view, recenter, mute;
+    bool tap; int tapX, tapY;      // panel pixels (320x240)
 };
 
-void helmInit(float yaw);
-void helmUpdate(float dt, bool driving, HelmEvents& ev);
-
-float helmYaw();
-float helmPitch();           // camera pitch only
-float helmThrottle();        // 0 .. 1 gas from tip-forward
-float helmBrake();           // 0 .. 1 from tip-back
-float helmSteer();           // -1 .. +1
-float helmTurnRate();        // rad/s
-bool  helmDragging();
-bool  helmHandbrake();       // C held
-void  helmLevel();
-void  helmSetAttitude(float yaw, float pitch);
-void  helmNudge(float dyaw, float dpitch);
+void  helmInit();
+void  helmUpdate(float dt, HelmEvents& ev);
+float helmSteer();      // -1 .. 1, + = right
+float helmThrottle();   // 0 .. 1
+float helmBrake();      // 0 .. 1
+float helmTip();        // -1 .. 1 (+ = top away): air pitch on the bike
+bool  helmHandbrake();
+void  helmRecenter();
 
 }

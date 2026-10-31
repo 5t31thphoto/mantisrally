@@ -3,32 +3,46 @@
 
 namespace mantis {
 
-// Internal framebuffer: 160x120, 8-bit palette indices. Scaled 2x to the 320x240 panel.
+// 160x120 palette-indexed frame, doubled to the 320x240 panel by display.cpp.
 constexpr int FB_W = 160;
 constexpr int FB_H = 120;
 
-// What the instruments show (written by the main loop each frame).
-struct HudInfo {
-    float throttle;             // 0..1
-    float scanT;                // 0 idle, 0..1 reading, >1 done (fading)
-    int scanX, scanY;           // panel pixels of the thing being read
-    const char* banner;         // a place name arriving, or a message
-    float bannerA;              // 0..1
-    float hintA;                // the controls hint, fading out after the start
+enum : uint8_t { VIEW_COCKPIT = 0, VIEW_EYE, VIEW_CHASE, VIEW_N };
+
+// Everything the renderer needs from the game this frame.
+struct ViewInfo {
+    uint8_t view, vehicle;
+    // the car
+    float x, y, z, yaw;            // y: CG height
+    float groundY;                 // ground under the car
+    float pitch, roll;             // body attitude (rad): nose up +, right side down +
+    float lean;                    // bike lean (rad, right +)
+    float steer;                   // -1..1 (wheel turned)
+    float speedMph, rpm01;
+    bool brake, reverse;
+    float bounce;                  // suspension heave for the camera
+    // hud
+    float offroadLeft;             // seconds before the recovery, < 0 hidden
+    const char* msg; float msgA;   // centre message
+    const char* sub;               // small line under it
+    int paceDir, paceSev; float paceA; bool paceCrest;
+    const char* juncL; const char* juncR; float juncA;
+    float storeA;                  // "MANTIS MOTORS AHEAD"
     bool showFps; int fps;
-    bool muteIcon; bool muted; float muteA;
 };
-extern HudInfo g_hud;
+extern ViewInfo g_view;
 
 void renderInit();
-void renderFrame(float x, float y, float z, float yaw, float pitch, float timeSec);
-// A world point on the panel (320x240 pixels). false if behind you / off screen. dist = metres.
-bool renderProject(float wx, float wy, float wz, int& px, int& py, float& dist);
-float renderFov();
+void renderSetVehicle(uint8_t v);               // loads its colours / cockpit
+void renderFrame();
+// a world point on the framebuffer (160x120). false if behind the camera.
+bool renderProject(float wx, float wy, float wz, float& sx, float& sy, float& depth);
+void renderSplat(float strength);               // mud on the glass / lens
+void renderWater(float strength);               // spray on the glass
 
-const uint8_t*  frameBuffer();       // FB_W*FB_H indices
-const uint16_t* framePalette565();   // 256 entries, byte-swapped RGB565 (panel order)
-const uint8_t*  framePaletteRGB();   // 256*3 RGB888 (host previews)
-int             frameBob();          // vertical bob in panel pixels
+const uint8_t*  frameBuffer();
+const uint16_t* framePalette565();
+const uint8_t*  framePaletteRGB();
+int             frameBob();
 
 }

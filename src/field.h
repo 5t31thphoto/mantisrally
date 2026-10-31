@@ -1,38 +1,29 @@
 #pragma once
 #include <stdint.h>
+#include "vehicle.h"
 
-// Roadside objects, checkpoints, spectators, rival cars. Collisions and scans live here.
+// The near field: deer, birds, particles (dust, mud, spray, snow), and everything solid you can hit.
 
 namespace mantis {
 
-enum ObjType : uint8_t {
-    OBJ_NONE = 0,
-    OBJ_TREE, OBJ_ROCK, OBJ_SIGN, OBJ_BARRIER, OBJ_SPECTATOR,
-    OBJ_CHECKPOINT, OBJ_RIVAL, OBJ_HAYBALE, OBJ_BRIDGE, OBJ_COUNT
-};
+enum : uint8_t { PK_DUST = 0, PK_MUD, PK_SPRAY, PK_SNOW, PK_GRAVEL, PK_SMOKE };
+struct Particle { float x, y, z, vx, vy, vz, life, age, size; uint8_t kind; };
+constexpr int PART_N = 72;
 
-struct FieldObj {
-    uint8_t type, var;
-    float x, y, z;      // y = height of base
-    float a, b;         // size / height extras
-    float yaw;
-    bool  on;
-};
+struct Critter { bool on; float x, z, y, yaw, speed, t, fear; uint8_t kind, pose; };
+constexpr int CRIT_N = 6;
 
-constexpr int FIELD_N = 48;
-constexpr int RIVAL_N = 4;
+struct Bird { bool on; float az, el, vaz, t; int n; };
 
-void fieldInit();
-void fieldUpdate(float carX, float carZ, float carYaw, float speed, float dt);
+void fieldInit(uint32_t seed);
+void fieldUpdate(const VehicleState& car, uint8_t vehicle, float dt);
+// solid things near the car: trees, rocks, the dealership. Returns the hardest impact (m/s).
+float fieldCollide(VehicleState& car, uint8_t vehicle);
+void fieldEmit(uint8_t kind, float x, float y, float z, float vx, float vy, float vz, float size, float life);
+void fieldHorn(float x, float z);
 
-// Move the car, collide with solid objects and banks. Returns fraction of move that happened.
-// *bump = impact strength 0..1; *surface from terrain.
-float fieldMove(float& x, float& y, float& z, float& yaw,
-                float dx, float dy, float dz, float dyaw,
-                float* bump, float* grip);
-
-const FieldObj* fieldObjects();
-float fieldNearest(uint8_t objType);
-void  fieldScare(float x, float z, float radius);   // horn / pass-by
+const Particle* fieldParticles();
+const Critter* fieldCritters();
+const Bird* fieldBirds();
 
 }

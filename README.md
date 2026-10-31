@@ -1,92 +1,81 @@
-# Mantis Rally
+# Mantis Rally (M5Stack Core2)
 
-Infinite branching rally / drift on M5Stack Core2. Same systems family as MantisPlanet and Mantis Seadiver: procedural stages, tilt controls, live audio, palette renderer.
+A nature-and-weather simulator you explore by rally car. A 160x120 palette renderer doubled to the panel (MantisPlanet's
+strip-streaming DMA display), live 24 kHz synthesis on core 0, a real vehicle-dynamics model, and a world that is dreamt
+ahead and forgotten behind: coherent, never stored.
 
-## Controls
+## Controls (hold it like a wheel)
 
 | Input | Action |
-|-------|--------|
-| Tip forward | Throttle |
-| Pull back | Brake (does not force reverse at a standstill) |
+|---|---|
 | Tilt left / right | Steer |
-| Drag on the touchscreen | Fine steering |
-| Tap a roadside object/sign | Scan it into the databank |
-| Hold the touchscreen | Toggle mute |
-| **A** | Horn / scare nearby spectators |
-| **B** | Re-centre the IMU steering neutral |
-| Hold **C** | Handbrake / initiate a drift |
+| Tip the top away | Throttle |
+| Pull the top back | Brake. Hold it at a standstill to engage reverse; in reverse it drives backwards. Throttle returns to drive. |
+| **A** (left button) | Horn (deer bolt) |
+| **B** tap | Change view: cockpit, eye level, chase |
+| **B** hold (0.65 s) | Re-centre the tilt |
+| **C** (right button) | Handbrake (hold) |
+| Touch the picture | Use what's in front of you (the dealership) |
+| Hold the picture 1.5 s | Mute / unmute |
+| Bike in the air | Tip forward / back to pitch the bike for the landing |
 
-## Gameplay
+The A/B/C buttons are zones of the touch panel below the picture; touches there are buttons only (the old build counted
+them as screen touches too, which is why holding a button muted the sound). Steering direction was also inverted; fixed.
 
-- Drive freely over the 3D heightfield. The road is a curved ribbon, not an invisible wall.
-- Cutting across rough ground costs grip and speed and produces controller rumble.
-- Staying off the road starts a visible three-second recovery timer. Re-enter the road to cancel it; when it expires, the car returns to the nearest road edge with reduced momentum.
-- Forks display left/right biome destinations. A committed fork bends the road toward the chosen branch, and that biome becomes the route target.
-- Sustained, fast slides bank drift points when the drift ends. The HUD shows speed, distance, current biome, grip, score, fork distance, scanning state, and off-road recovery.
-- The world is endless: biome progression, road forks, weather, day/night, props, scans, and drift scoring are the core loop rather than a separate race-finish screen.
+## Vehicles
 
-## Build (local)
+| | Drive | Trick |
+|---|---|---|
+| **MANTIS STI** (start) | AWD 41/59, turbo flat four, rally tyres, best on gravel | Pace notes from the co-driver (next corner: direction and severity 1-6, H = hairpin, crests). Launch control: brake + throttle at a standstill, release the brake. |
+| **OLD JEEP 4.0** | 4x4, soft and bouncy, heavy slow steering, no ABS | Leave the road up to 45 m without the clock; low range kicks in climbing slowly; wades water to 0.85 m. |
+| **STINGRAY BAJA** | Lifted V8, RWD, all-terrains: fastest, corners hardest on tarmac, loose on dirt | Shortcuts (18 m off-road band), power-oversteer drifts, full-throttle full-lock donuts that fling mud onto the glass. |
+| **CR250 DIRT BIKE** (endgame) | Two-stroke 250, knobbies, wheelies | Goes anywhere, no clock. Off the roads your compass heading picks the next biome; roads cross your path now and then. |
 
-```bash
-pio run -e m5stack-core2
-pio run -t upload
-```
+Each vehicle is one row in `VEHICLES` (`src/vehicle.cpp`): mass, wheelbase, weight split, steering, torque curve, gears,
+drivetrain split, brakes, tyre grip per surface, Pacejka shape, aero, suspension, off-road band, wading depth, camera, and its
+price. A new unlockable is a new row plus its art (see Tools).
 
-`merge_bin.py` runs after build and writes `firmware_merged.bin` (bootloader + partitions + app) for the web flasher.
+## Progression
 
-## GitHub Actions + Pages
+The currency is miles driven in a particular vehicle. The Jeep costs 20 miles in the STI, the Stingray 40 in the Jeep, the bike
+60 in the Stingray. **MANTIS MOTORS** appears beside the road every few miles (sooner once you can afford the next vehicle). Pull
+onto the gravel lot and stop. It shows only the next vehicle for sale (BUY greyed until you can afford it), your garage to swap
+between, and, once you've seen all 12 biomes, the switch for **off-road mode for every vehicle**. Progress is saved to flash.
 
-Workflow: `GitHub/workflows/ci.yml` (repo maps this into `.github/workflows` — do not ship a `.github` folder in the payload zip).
+## The world
 
-On push to `main` / `master` (or manual dispatch):
+12 biomes on a climate map (north colder and higher, east wetter): Pine Forest, Redwood Cathedral, Lake Country, Rain Moor,
+Devil's Pass, Alpine Summit, Red Canyon, Coast Highway, Wildflower Meadow, Autumn Ridge, Bayou Mud, Frost Tundra. A biome is
+about 2 miles. Every 3-7 miles the road forks (the first comes early); the sign and a small banner say where each branch
+leads and how far. Stay on a road and it routes biome by biome to its destination, then carries on to a new one. Roads go
+forever. Each biome sets the road's surface (tarmac, gravel, dirt, mud, snow), width, corner mix (sweepers to switchback
+hairpins), grade (up to 12 %), crests (getting air on the road is possible but hard), land, water, plants, colours and weather.
 
-1. Optional root `*.zip` payload is extracted into the repo and consumed
-2. PlatformIO builds `m5stack-core2`
-3. Merged firmware is copied to `website/firmware/firmware-merged.bin`
-4. `website/` is deployed to **GitHub Pages**
+Weather wanders: clear spells, rain, storms with lightning (thunder arrives after the flash), fog, snow, dust, rainbows after
+rain, aurora on clear cold nights, fireflies at dusk, falling leaves, light shafts. Headlights come on automatically and light
+the road, the paint (it's retro-reflective) and the trees. Water reflects the sky and the land; wet roads shine.
 
-Enable **Settings → Pages → Build and deployment → GitHub Actions**.
+## Views
 
-## Web flasher
+Cockpit (your interior art, the wheel turns with the steering), eye level (no interior), and chase. The chase vehicles are
+rendered from your sprite sheet: each vehicle's side profile, rear view and top view are carved into a voxel model, textured
+from those drawings and rendered with true perspective (6 yaw steps mirrored, uphill / level / downhill). The bike's frames are
+its rear drawing leaned about the tyre's contact patch.
 
-Live site (after Pages deploy): the install button uses [ESP Web Tools](https://esphome.github.io/esp-web-tools/) against:
+## Tools
 
-```
-website/firmware/manifest.json
-website/firmware/firmware-merged.bin
-```
+* `tools/sprites/make_vehicles.py`: chase frames from `vehicles_sheet.jpg` (+ top views from `angles_sheet.png`) -> `src/vehicle_art.h`.
+  Writes `vehicles_preview.png`. Better side / rear / top drawings in the sheet = better chase sprites, automatically.
+* `tools/sprites/make_cockpits.py`: cockpits from `cockpits_sheet.jpg` -> `src/cockpit_art.h`.
+* `tools/host/gameplay_test.cpp`: the CI world test (40 miles of road, forks, biomes, dealership, recovery, free roam).
+* `tools/host/drive_sim.cpp`: the whole game on the desktop (real setup()/loop(), a tilt autopilot through the IMU path),
+  with frame timings. `drive_sim [minutes] [vehicle 0-3] [view 0-2]`.
+* `tools/host/snap.cpp` + `render.py`: showcase stills (biomes x times of day x views x vehicles).
 
-Chrome / Edge + USB. Same pattern as Planet and Seadiver.
+Build: `pio run -e m5stack-core2` (the CI workflow and the web installer are unchanged).
 
-Manual flash:
+## Tuning knobs
 
-```bash
-esptool.py --chip esp32 write_flash 0x0 firmware_merged.bin
-```
-
-## Host tools
-
-```bash
-# gameplay regression checks (no PlatformIO required)
-g++ -O2 -DHOST -I src -I tools/host/stubs tools/host/gameplay_test.cpp \
-  src/universe.cpp src/journey.cpp src/terrain.cpp -lm -o /tmp/gameplay_test
-/tmp/gameplay_test
-
-# showcase stills
-g++ -O2 -DHOST -I src -I tools/host/stubs tools/host/snap_rally.cpp \
-  src/universe.cpp src/journey.cpp src/terrain.cpp src/field.cpp \
-  src/scene.cpp src/render.cpp src/databank.cpp -lm -o /tmp/snap_rally
-# driving GIF frames
-g++ -O2 -DHOST -I src -I tools/host/stubs tools/host/drive_gif.cpp \
-  ... same objects ... -lm -o /tmp/drive_gif
-```
-
-## Architecture
-
-- **Helm** — tilt throttle / brake, C handbrake, steer
-- **Terrain** — Seadiver-style scrolling heightfield, road cut, banks, junctions
-- **Journey** — 17 biomes, branch commits
-- **Field** — roadside props, slide collisions
-- **Render** — TOD palette (Planet), heightmap ground raycast, props
-- **Audio** — RPM engine bed, surface layers, reactive score
-- **Haptics** — motor gestures for slip / bumps / shifts
+`src/helm.cpp` (tilt ranges, expo, inversion), `src/main.cpp` (off-road clock, stall clock, dealership stop), `src/vehicle.cpp`
+(every vehicle), `src/journey.cpp` (biome table), `src/terrain.cpp` (road generation, fork spacing, store spacing),
+`src/scene.cpp` (weather), `src/render.cpp` (palette keys, fog, cameras), `src/engine.cpp` (engine characters).

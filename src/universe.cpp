@@ -70,7 +70,7 @@ MP_HOT float fbm2(float x, float y, int oct, uint32_t salt) {
 }
 
 static float s_dayOffset = 0.36f;      // the stage begins in clear mid-morning light
-float dayClock(float t, float distance) { return s_dayOffset + t * (1.f / 600.f) + distance * 0.0002f + 10.f; }
+float dayClock(float t, float distance) { return s_dayOffset + t * (1.f / 840.f) + distance * 0.00009f + 10.f; }
 void setTimeOfDay(float tod, float t, float distance) {
     float c = dayClock(t, distance);
     s_dayOffset += tod - (c - floorf(c));

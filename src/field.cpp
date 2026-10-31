@@ -1,212 +1,165 @@
 #pragma GCC optimize("Os")
 #include "field.h"
 #include "terrain.h"
-#include "universe.h"
 #include "journey.h"
+#include "scene.h"
+#include "universe.h"
 #include <math.h>
 #include <string.h>
 
 namespace mantis {
 
+static Particle s_p[PART_N];
+static int s_pNext = 0;
+static Critter s_c[CRIT_N];
+static Bird s_bird;
+static uint32_t s_seed = 1, s_rng = 1;
+static float s_deerNext = 8.f, s_birdNext = 20.f;
+
+static inline float frand() { s_rng = hash32(s_rng + 0x9E3779B9u); return (s_rng >> 8) * (1.f / 16777216.f); }
 static inline float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b : v); }
 
-static FieldObj s_obj[FIELD_N];
-static float s_carX = 0.f, s_carZ = 0.f, s_carYaw = 0.f;
-static float s_spawnAcc = 0.f;
-
-void fieldInit() {
-    memset(s_obj, 0, sizeof(s_obj));
-    s_spawnAcc = 0.f;
+void fieldInit(uint32_t seed) {
+    memset(s_p, 0, sizeof(s_p)); memset(s_c, 0, sizeof(s_c)); memset(&s_bird, 0, sizeof(s_bird));
+    s_seed = seed; s_rng = seed ^ 0xF1E1Du;
+    s_deerNext = 6.f; s_birdNext = 15.f;
 }
 
-static int freeSlot() {
-    for (int i = 0; i < FIELD_N; i++) if (!s_obj[i].on) return i;
-    return -1;
+const Particle* fieldParticles() { return s_p; }
+const Critter* fieldCritters() { return s_c; }
+const Bird* fieldBirds() { return &s_bird; }
+
+void fieldEmit(uint8_t kind, float x, float y, float z, float vx, float vy, float vz, float size, float life) {
+    Particle& p = s_p[s_pNext];
+    s_pNext = (s_pNext + 1) % PART_N;
+    p.x = x; p.y = y; p.z = z; p.vx = vx; p.vy = vy; p.vz = vz; p.size = size; p.life = life; p.age = 0.f; p.kind = kind;
 }
 
-static void place(int i, uint8_t type, float x, float z, uint32_t h) {
-    TrackSample ts = terrainAt(x, z);
-    s_obj[i].type = type;
-    s_obj[i].var  = (uint8_t)(h & 3);
-    s_obj[i].x = x; s_obj[i].z = z;
-    s_obj[i].y = ts.height;
-    s_obj[i].yaw = (h >> 8) * (kTau / 256.f);
-    s_obj[i].on = true;
-    switch (type) {
-        case OBJ_TREE:
-            s_obj[i].a = 1.4f + (h & 15) * 0.18f;           // trunk radius-ish
-            s_obj[i].b = 5.5f + (h >> 4 & 31) * 0.35f;      // height
-            break;
-        case OBJ_ROCK:
-            s_obj[i].a = 0.8f + (h & 15) * 0.15f;
-            s_obj[i].b = s_obj[i].a * (0.7f + (h & 7) * 0.08f);
-            break;
-        case OBJ_BARRIER:
-            s_obj[i].a = 1.2f + (h & 7) * 0.1f;
-            s_obj[i].b = 0.9f;
-            break;
-        case OBJ_HAYBALE:
-            s_obj[i].a = 1.0f + (h & 7) * 0.08f;
-            s_obj[i].b = 0.8f;
-            break;
-        case OBJ_SIGN:
-            s_obj[i].a = 0.4f; s_obj[i].b = 2.2f;
-            break;
-        case OBJ_SPECTATOR:
-            s_obj[i].a = 0.35f; s_obj[i].b = 1.6f;
-            break;
-        default:
-            s_obj[i].a = 1.f; s_obj[i].b = 1.f;
-            break;
+void fieldHorn(float x, float z) {
+    for (Critter& c : s_c) if (c.on) { float d = hypotf(c.x - x, c.z - z); if (d < 80.f) c.fear = 1.f; }
+}
+
+static void spawnDeer(const VehicleState& car) {
+    const Land& L = journeyLand();
+    float forest = L.pine + L.broad + L.redwood + L.flowers * 0.5f + L.bush * 0.3f;
+    if (forest < 0.2f || g_scene.biomeA == B_TUNDRA) return;
+    for (Critter& c : s_c) if (!c.on) {
+        float fx = cosf(car.yaw), fz = sinf(car.yaw);
+        float d = 60.f + frand() * 70.f;
+        float side = (frand() < 0.5f ? -1.f : 1.f) * (8.f + frand() * 25.f);
+        float x = car.x + fx * d - fz * side, z = car.z + fz * d + fx * side;
+        Ground g; terrainGround(x, z, g);
+        if (g.mat == MAT_WATER || g.mat == MAT_ROCK) return;
+        c.on = true; c.x = x; c.z = z; c.y = g.h; c.kind = 0; c.pose = 3; c.fear = 0.f; c.speed = 0.f;
+        c.yaw = frand() * 6.283f; c.t = 0.f;
+        // sometimes a small group
+        if (frand() < 0.35f) for (Critter& d2 : s_c) if (!d2.on) { d2 = c; d2.x += (frand() - 0.5f) * 6.f; d2.z += (frand() - 0.5f) * 6.f; d2.yaw += frand() - 0.5f; break; }
+        return;
     }
 }
 
-static void spawnWave(float cx, float cz, float carYaw) {
-    const BiomeInfo& st = journeyBiome(journeyCurrent());
-    const BiomeInfo& nx = journeyBiome(journeyNext());
-    float bl = journeyBlend();
-    float treeD = st.treeDensity * (1.f - bl) + nx.treeDensity * bl;
-    float rockD = st.rockDensity * (1.f - bl) + nx.rockDensity * bl;
-
-    float ax = cosf(carYaw), az = sinf(carYaw);
-    float rx = -az, rz = ax;
-
-    int budget = 10;
-    for (int attempt = 0; attempt < 28 && budget > 0; attempt++) {
-        int i = freeSlot();
-        if (i < 0) break;
-        uint32_t h = hash32(worldSeed() + (uint32_t)(cx * 7.f) + (uint32_t)(cz * 11.f) + attempt * 97u + (uint32_t)s_spawnAcc);
-        float along = 18.f + (h & 255) / 255.f * 55.f;
-        float side = ((h >> 8) & 255) / 255.f * 2.f - 1.f;
-        // prefer banks, not the road centre
-        float lat = (6.5f + (h >> 16 & 31) * 0.45f) * (side < 0.f ? -1.f : 1.f);
-        float x = cx + ax * along + rx * lat;
-        float z = cz + az * along + rz * lat;
-        TrackSample ts = terrainAt(x, z);
-        if (fabsf(ts.across) < ts.roadHalf + 1.2f) continue; // still on road
-
-        float roll = (h >> 24) / 255.f;
-        uint8_t type = OBJ_NONE;
-        if (roll < treeD * 0.55f) type = OBJ_TREE;
-        else if (roll < treeD * 0.55f + rockD * 0.35f) type = OBJ_ROCK;
-        else if (roll < 0.78f) type = OBJ_SIGN;
-        else if (roll < 0.86f) type = OBJ_SPECTATOR;
-        else if (roll < 0.93f) type = OBJ_HAYBALE;
-        else type = OBJ_BARRIER;
-
-        // no spectators in desert/volcano/salt empties
-        if (type == OBJ_SPECTATOR && treeD < 0.15f && rockD > 0.4f) type = OBJ_ROCK;
-        if (type == OBJ_TREE && treeD < 0.08f) type = OBJ_ROCK;
-
-        place(i, type, x, z, h);
-        budget--;
+void fieldUpdate(const VehicleState& car, uint8_t vehicle, float dt) {
+    // particles
+    for (Particle& p : s_p) {
+        if (p.life <= 0.f) continue;
+        p.age += dt;
+        if (p.age >= p.life) { p.life = 0.f; continue; }
+        float drag = p.kind == PK_DUST || p.kind == PK_SMOKE ? 1.6f : 0.4f;
+        p.vx -= p.vx * drag * dt; p.vz -= p.vz * drag * dt;
+        p.vy += (p.kind == PK_DUST || p.kind == PK_SMOKE ? 0.6f - p.vy * 1.5f : -9.8f) * dt;
+        p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+        if (p.kind == PK_DUST || p.kind == PK_SMOKE) p.size += dt * 1.6f;
     }
-}
-
-void fieldUpdate(float carX, float carZ, float carYaw, float speed, float dt) {
-    s_carX = carX; s_carZ = carZ; s_carYaw = carYaw;
-    s_spawnAcc += speed * dt;
-
-    // Place roadside scenery relative to the actual curved ribbon, not the
-    // player's temporary drift heading. This keeps props on the shoulders in
-    // bends and lets the player look/slide away without rotating the world.
-    float roadX, roadZ, roadCurv;
-    terrainDirection(carX, carZ, roadX, roadZ, roadCurv);
-    (void)roadCurv;
-    float roadYaw = atan2f(roadZ, roadX);
-
-    // Cull behind / far along the road
-    float ax = roadX, az = roadZ;
-    for (int i = 0; i < FIELD_N; i++) {
-        if (!s_obj[i].on) continue;
-        float dx = s_obj[i].x - carX, dz = s_obj[i].z - carZ;
-        float d2 = dx * dx + dz * dz;
-        if (d2 > 110.f * 110.f) { s_obj[i].on = false; continue; }
-        // drop far behind
-        float along = dx * ax + dz * az;
-        if (along < -18.f && d2 > 30.f * 30.f) s_obj[i].on = false;
+    // what the wheels throw
+    const VehicleSpec& V = vehicleSpec(vehicle);
+    float cy = cosf(car.yaw), sy = sinf(car.yaw);
+    float rearX = car.x - cy * V.wheelbase * 0.55f, rearZ = car.z - sy * V.wheelbase * 0.55f;
+    float wx = cy * car.u - sy * car.v, wz = sy * car.u + cy * car.v;
+    bool loose = car.surf != SURF_TARMAC;
+    float slide = clampf(fabsf(car.v) / 6.f + car.spin, 0.f, 1.5f);
+    float rate = (loose ? clampf(car.speed / 18.f, 0.f, 1.f) * 0.5f + slide : slide * 0.5f) * (car.air ? 0.f : 1.f);
+    if (g_scene.wet > 0.4f && !loose) rate = clampf(car.speed / 20.f, 0.f, 1.f) * 0.6f;
+    static float acc = 0.f;
+    acc += rate * dt * 30.f;
+    while (acc > 1.f) {
+        acc -= 1.f;
+        uint8_t k = PK_DUST;
+        if (car.surf == SURF_MUD || (car.surf == SURF_DIRT && g_scene.wet > 0.4f)) k = PK_MUD;
+        else if (car.surf == SURF_SNOW) k = PK_SNOW;
+        else if (!loose) k = g_scene.wet > 0.4f ? PK_SPRAY : PK_SMOKE;
+        if (car.water > 0.2f) k = PK_SPRAY;
+        float side = frand() < 0.5f ? -1.f : 1.f;
+        float ox = -sy * side * V.track * 0.5f, oz = cy * side * V.track * 0.5f;
+        float spray = (k == PK_MUD || k == PK_SPRAY || k == PK_SNOW) ? 1.f : 0.3f;
+        // spin throws it backwards and up, a slide throws it sideways
+        float bx = -wx * 0.25f - cy * car.spin * 9.f * spray + (-sy) * car.v * 0.4f;
+        float bz = -wz * 0.25f - sy * car.spin * 9.f * spray + cy * car.v * 0.4f;
+        fieldEmit(k, rearX + ox, car.y - V.rideHeight + 0.2f, rearZ + oz,
+                  bx + (frand() - 0.5f) * 3.f, (k == PK_DUST || k == PK_SMOKE ? 0.6f : 2.f + frand() * 3.5f * spray), bz + (frand() - 0.5f) * 3.f,
+                  k == PK_DUST ? 0.9f : (k == PK_SMOKE ? 0.6f : 0.18f), k == PK_DUST ? 2.2f : (k == PK_SMOKE ? 1.2f : 0.9f));
     }
+    if (car.evSplash > 0.f) for (int i = 0; i < 6; i++)
+        fieldEmit(PK_SPRAY, car.x + (frand() - 0.5f) * 2.f, car.y, car.z + (frand() - 0.5f) * 2.f, wx * 0.3f + (frand() - 0.5f) * 5.f, 3.f + frand() * 4.f, wz * 0.3f + (frand() - 0.5f) * 5.f, 0.25f, 1.0f);
 
-    // Spawn on a distance clock
-    static float lastSpawn = 0.f;
-    if (s_spawnAcc - lastSpawn > 12.f) {
-        lastSpawn = s_spawnAcc;
-        spawnWave(carX + ax * 40.f, carZ + az * 40.f, roadYaw);
-    }
-}
-
-float fieldMove(float& x, float& y, float& z, float& yaw,
-                float dx, float dy, float dz, float dyaw,
-                float* bump, float* grip) {
-    if (bump) *bump = 0.f;
-    TrackSample ts = terrainAt(x + dx, z + dz);
-    if (grip) *grip = ts.grip;
-
-    float nx = x + dx, nz = z + dz;
-    float ny = ts.height + 0.35f;
-
-    // Soft verge: grip already drops off-road; do NOT zero speed (that made the car die).
-    float hit = 0.f;
-    if (fabsf(ts.across) > ts.roadHalf + ts.bankL * 0.95f) {
-        float push = (fabsf(ts.across) - ts.roadHalf - ts.bankL * 0.5f) * 0.04f;
-        hit = fmaxf(hit, clampf(push, 0.f, 0.25f));
-        // mild scrub only
-        nx = x + dx * 0.92f;
-        nz = z + dz * 0.92f;
-    }
-
-    for (int i = 0; i < FIELD_N; i++) {
-        if (!s_obj[i].on) continue;
-        uint8_t t = s_obj[i].type;
-        if (t == OBJ_SIGN || t == OBJ_SPECTATOR || t == OBJ_CHECKPOINT) continue;
-        float ox = s_obj[i].x - nx, oz = s_obj[i].z - nz;
-        float rad = s_obj[i].a * (t == OBJ_TREE ? 0.7f : 0.55f);
-        float d2 = ox * ox + oz * oz;
-        if (d2 < rad * rad) {
-            float d = sqrtf(fmaxf(d2, 1e-6f));
-            float push = (rad - d) / rad;
-            // slide: kill the component into the object
-            float nxn = ox / d, nzn = oz / d;
-            float into = dx * nxn + dz * nzn;
-            if (into > 0.f) {
-                nx -= nxn * into * 0.85f;
-                nz -= nzn * into * 0.85f;
-            }
-            nx -= nxn * push * rad * 0.35f;
-            nz -= nzn * push * rad * 0.35f;
-            hit = fmaxf(hit, push);
-        }
-    }
-    if (bump) *bump = hit;
-
-    float frac = 1.f - hit * 0.25f;
-    x = x + (nx - x);
-    z = z + (nz - z);
-    // re-sample height at final pos
-    y = terrainAt(x, z).height + 0.35f;
-    yaw += dyaw * frac;
-    return frac;
-}
-
-const FieldObj* fieldObjects() { return s_obj; }
-
-float fieldNearest(uint8_t objType) {
-    float best = 999.f;
-    for (int i = 0; i < FIELD_N; i++) {
-        if (!s_obj[i].on || s_obj[i].type != objType) continue;
-        float dx = s_obj[i].x - s_carX, dz = s_obj[i].z - s_carZ;
+    // deer: graze near the road, look up, bound away when you come close or sound the horn
+    s_deerNext -= dt;
+    if (s_deerNext <= 0.f) { s_deerNext = 14.f + frand() * 30.f; spawnDeer(car); }
+    for (Critter& c : s_c) {
+        if (!c.on) continue;
+        c.t += dt;
+        float dx = c.x - car.x, dz = c.z - car.z;
         float d = sqrtf(dx * dx + dz * dz);
-        if (d < best) best = d;
+        if (d > 260.f) { c.on = false; continue; }
+        if (d < 26.f + car.speed * 0.8f) c.fear = fmaxf(c.fear, 0.7f);
+        if (c.fear > 0.3f) {
+            float away = atan2f(dz, dx) + sinf(c.t * 0.7f + c.x) * 0.5f;
+            c.yaw += clampf(wrapPi(away - c.yaw), -3.f * dt, 3.f * dt);
+            c.speed += (11.f - c.speed) * dt * 2.f;
+            c.fear -= dt * 0.05f;
+        } else {
+            c.speed += (0.f - c.speed) * dt * 2.f;
+            if (fmodf(c.t, 9.f) < 0.02f) c.yaw += frand() - 0.5f;
+        }
+        c.x += cosf(c.yaw) * c.speed * dt; c.z += sinf(c.yaw) * c.speed * dt;
+        c.y = terrainHeight(c.x, c.z);
+        c.pose = c.speed > 1.f ? (uint8_t)(1 + ((int)(c.t * c.speed * 0.9f) & 1)) : (fmodf(c.t + c.x, 6.f) < 3.5f ? 3 : 0);
     }
-    return best;
+    // a skein of birds now and then (daylight)
+    s_birdNext -= dt;
+    if (s_bird.on) { s_bird.az += s_bird.vaz * dt; s_bird.t += dt; if (s_bird.t > 40.f) s_bird.on = false; }
+    else if (s_birdNext <= 0.f && g_scene.night < 0.4f && g_scene.rain < 0.3f) {
+        s_birdNext = 40.f + frand() * 80.f;
+        s_bird.on = true; s_bird.az = car.yaw - 0.9f + frand() * 0.4f; s_bird.vaz = 0.03f + frand() * 0.03f;
+        s_bird.el = 0.12f + frand() * 0.2f; s_bird.t = 0.f; s_bird.n = 5 + (int)(frand() * 6.f);
+    }
 }
 
-void fieldScare(float x, float z, float radius) {
-    for (int i = 0; i < FIELD_N; i++) {
-        if (!s_obj[i].on || s_obj[i].type != OBJ_SPECTATOR) continue;
-        float dx = s_obj[i].x - x, dz = s_obj[i].z - z;
-        if (dx * dx + dz * dz < radius * radius) s_obj[i].var = 3;
+float fieldCollide(VehicleState& car, uint8_t vehicle) {
+    float hit = 0.f;
+    const Grid& g = terrainNear();
+    int ci = (int)floorf(car.x * g.inv), cj = (int)floorf(car.z * g.inv);
+    for (int j = cj - 2; j <= cj + 2; j++) for (int i = ci - 2; i <= ci + 2; i++) {
+        Veg v;
+        if (!vegAt(i, j, v) || v.radius <= 0.f) continue;
+        if (car.y - car.comp > v.y + v.size + 0.5f) continue;        // flying over a boulder
+        float r = v.radius;
+        hit = fmaxf(hit, vehicleHitPost(car, vehicle, v.x, v.z, r));
     }
+    const Store* st = roadStore();
+    if (st && st->active) {
+        // the building sits at the back of the lot
+        float bx = st->x + (-sinf(st->yaw)) * 0.f, bz = st->z;
+        float dx = car.x - bx, dz = car.z - bz;
+        float along = dx * cosf(st->yaw) + dz * sinf(st->yaw);
+        float lat = -dx * sinf(st->yaw) + dz * cosf(st->yaw);
+        (void)along; (void)lat;
+        hit = fmaxf(hit, vehicleHitPost(car, vehicle, bx, bz, 5.5f));
+    }
+    for (Critter& c : s_c) if (c.on) {                               // deer always leap clear
+        float d = hypotf(c.x - car.x, c.z - car.z);
+        if (d < 4.f) { c.fear = 1.f; c.speed = 14.f; }
+    }
+    return hit;
 }
 
 }

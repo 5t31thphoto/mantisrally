@@ -1,46 +1,26 @@
 #pragma once
 #include <stdint.h>
 
-// Shared world state — same idea as MantisPlanet: one struct the main loop writes,
-// renderer + audio both read. Floats only (atomic 32-bit stores on ESP32).
+// The sky, the light and the weather: one struct the game writes, the renderer and the audio read.
 
 namespace mantis {
 
 struct Scene {
-    float t, dt, tod, yaw, pitch, distance, speed, throttle;
-    float x, y, z;
-    float altitude;
-    float cruiseFor, stillFor;
-
-    float sunElev, sunAz;
-    // weather (Planet-style)
-    float cloud, rain, storm, fog, wind, wet, dust, snow;
-    float rainAgo;          // seconds since last proper rain
-    float flash;            // lightning 0..1
-    float boltAge;
-    float dayLight, light;
-
-    uint8_t stage;          // current biome id
-    float grip, roughness;
-    float engineLoad, slip, handbrake;
-    float checkpointNear;
-    float dustTrail, sparks;
-
-    // moments
-    float jump, crest, passBy, horn, finish;
-    float beams;            // crepuscular strength
-    float rainbow;
-    bool  lights;
-    uint32_t daySeed;
+    float t, dt, tod, sunElev, sunAz, night, dayLight, moon;
+    float cloud, rain, storm, fog, wind, windAz, wet, dust, snow, mist;
+    float flash, boltAz, boltAge; uint32_t boltSeed; float thunderIn, thunderPow;
+    float rainbow, aurora, beams, fireflies, leaves;
+    float speed, distance, x, z, yaw;
+    uint8_t biomeA, biomeB; float blend;
+    float lights;          // headlights 0..1 (automatic)
+    float awe;             // how spectacular this moment is (the score swells)
+    float front;           // the weather system's wander 0 (clear) .. 1 (the worst this biome does)
 };
-
 extern Scene g_scene;
 
-void sceneInit();
-void sceneUpdate(float t, float dt,
-                 float x, float y, float z,
-                 float yaw, float pitch,
-                 float distance, float speed, float throttle,
-                 float grip, float slip, bool handbrake);
+void sceneInit(uint32_t seed);
+void sceneUpdate(float t, float dt, float x, float z, float yaw, float speed, float distance);
+// previews / tests
+void sceneForceWeather(float cloud, float rain, float fog, float storm, float snow);
 
 }
