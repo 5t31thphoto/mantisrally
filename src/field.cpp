@@ -68,7 +68,7 @@ void fieldUpdate(const VehicleState& car, uint8_t vehicle, float dt) {
         p.vx -= p.vx * drag * dt; p.vz -= p.vz * drag * dt;
         p.vy += (p.kind == PK_DUST || p.kind == PK_SMOKE ? 0.6f - p.vy * 1.5f : -9.8f) * dt;
         p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
-        if (p.kind == PK_DUST || p.kind == PK_SMOKE) p.size += dt * 1.6f;
+        if (p.kind == PK_DUST || p.kind == PK_SMOKE) p.size += dt * 0.9f;
     }
     // what the wheels throw
     const VehicleSpec& V = vehicleSpec(vehicle);
@@ -96,7 +96,7 @@ void fieldUpdate(const VehicleState& car, uint8_t vehicle, float dt) {
         float bz = -wz * 0.25f - sy * car.spin * 9.f * spray + cy * car.v * 0.4f;
         fieldEmit(k, rearX + ox, car.y - V.rideHeight + 0.2f, rearZ + oz,
                   bx + (frand() - 0.5f) * 3.f, (k == PK_DUST || k == PK_SMOKE ? 0.6f : 2.f + frand() * 3.5f * spray), bz + (frand() - 0.5f) * 3.f,
-                  k == PK_DUST ? 0.9f : (k == PK_SMOKE ? 0.6f : 0.18f), k == PK_DUST ? 2.2f : (k == PK_SMOKE ? 1.2f : 0.9f));
+                  k == PK_DUST ? 0.45f : (k == PK_SMOKE ? 0.35f : 0.08f), k == PK_DUST ? 1.8f : (k == PK_SMOKE ? 1.0f : 0.8f));
     }
     if (car.evSplash > 0.f) for (int i = 0; i < 6; i++)
         fieldEmit(PK_SPRAY, car.x + (frand() - 0.5f) * 2.f, car.y, car.z + (frand() - 0.5f) * 2.f, wx * 0.3f + (frand() - 0.5f) * 5.f, 3.f + frand() * 4.f, wz * 0.3f + (frand() - 0.5f) * 5.f, 0.25f, 1.0f);

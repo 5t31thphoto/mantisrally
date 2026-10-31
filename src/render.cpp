@@ -283,7 +283,7 @@ static void setupCamera() {
         hor0 = H * 0.47f + tanf(pitch) * F;
     }
     fx = cosf(cyaw); fz = sinf(cyaw); rx = -fz; rz = fx;
-    rollT = tanf(roll);
+    rollT = -tanf(roll);                 // camera rolled right (right side down): the horizon's right end rises
     for (int x = 0; x < W; x++) {
         float kx = (x + 0.5f - W * 0.5f) / F;
         kxC[x] = kx; dxC[x] = fx + rx * kx; dzC[x] = fz + rz * kx;
@@ -907,14 +907,18 @@ static void drawParticles() {
             case PK_SMOKE: c = P_HAZE + 13; break;
             default: c = (uint8_t)(P_SOIL + 10); break;
         }
-        float dens = (p[k].kind == PK_DUST || p[k].kind == PK_SMOKE) ? fade * 0.6f : 1.f;
+        bool puff = p[k].kind == PK_DUST || p[k].kind == PK_SMOKE;
+        // puffs thin out as they grow and age, and near the lens they are mostly air
+        float dens = puff ? fade * 0.45f * clampf(d / 6.f, 0.15f, 1.f) : 1.f;
         int R = (int)(r + 0.5f);
-        if (R > 18) R = 18;
+        int cap = puff ? 7 : 2;
+        if (R > cap) R = cap;
+        if (!puff && d < 2.5f) continue;
         for (int dy = -R; dy <= R; dy++) for (int dx = -R; dx <= R; dx++) {
             if (dx * dx + dy * dy > R * R + 1) continue;
             int x = (int)sx + dx, y = (int)sy + dy;
             if ((unsigned)x >= (unsigned)W || (unsigned)y >= (unsigned)H) continue;
-            if (dens < 1.f && dith(x + k, y) > dens) continue;
+            if (dens < 1.f && dith(x + k, y) > dens * (1.f - (dx * dx + dy * dy) / (float)(R * R + 1) * 0.6f)) continue;
             putZ(x, y, c, zc);
         }
     }

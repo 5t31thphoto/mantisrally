@@ -315,14 +315,17 @@ static void substep(VehicleState& s, const VehicleSpec& V, uint8_t id, const Veh
     // ---- body on its springs (what the camera feels) ----
     float wB = 6.2831853f * V.springHz * 1.1f, zB = V.damping;
     float pT = s.air ? s.airPitch : s.groundPitch - s.longG * 0.045f * (V.bike ? 0.5f : 1.f) + s.wheelie;
-    float rT = s.air ? s.roll * 0.98f : s.groundRoll + s.latG * (V.bike ? 0.f : 0.05f) * (V.cgHeight / 0.6f);
+    // visual roll, right side down +: the ground's camber, and a car's body rolling to the outside of the turn
+    float rT = s.air ? s.roll * 0.98f : -s.groundRoll - s.latG * (V.bike ? 0.f : 0.05f) * (V.cgHeight / 0.6f);
     s.pitchV += (-(wB * wB) * (s.pitch - pT) - 2.f * zB * wB * s.pitchV) * dt;
     s.rollV += (-(wB * wB) * (s.roll - rT) - 2.f * zB * wB * s.rollV) * dt;
     s.pitch += s.pitchV * dt;
     s.roll += s.rollV * dt;
     if (V.bike) {
-        float leanT = s.air ? s.lean * 0.97f : -atanf(s.u * s.r / G);
-        leanT = clampf(leanT, -0.9f, 0.9f);
+        // a bike leans INTO the turn (right turn: lean right, +), as far as the cornering force asks
+        // from the cornering force actually felt (a slide doesn't lay the bike down); upright at walking pace
+        float leanT = s.air ? s.lean * 0.97f : (atanf(s.latG) + s.steer * 0.12f) * clampf((spd - 1.5f) / 5.f, 0.f, 1.f);
+        leanT = clampf(leanT, -0.75f, 0.75f);
         s.lean += (leanT - s.lean) * clampf(dt * 7.f, 0.f, 1.f);
     }
     s.wheelRot += s.u * dt / V.wheelRadius;
