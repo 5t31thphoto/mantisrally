@@ -21,6 +21,7 @@ void natureBlock(Bus& b, int n, const NatScene& s);
 void natureBump(uint8_t kind);
 void natureThunder(float delaySec, float power, float close);
 void natureCritter(uint8_t kind, float dist);
+void natureImpact(uint8_t kind, float strength);
 
 void engineInit();
 void engineBlock(Bus& b, int n);

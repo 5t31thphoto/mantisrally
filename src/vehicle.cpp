@@ -14,7 +14,7 @@ static inline float wrapPiF(float a) { while (a > 3.14159265f) a -= 6.2831853f; 
 
 //                   tarmac gravel dirt  mud   snow  sand  grass rock
 static const VehicleSpec VEHICLES[V_COUNT] = {
-    { "MANTIS STI", "STI", "2013 HATCH. AWD. TURBO FLAT FOUR.", "PACE NOTES + LAUNCH CONTROL", false,
+    { "MANTIS STI", "STI", "2013 HATCH. AWD. TURBO FLAT FOUR.", "PACE NOTES, LAUNCH CONTROL", false,
       1480.f, 2.62f, 0.60f, 0.50f, 1.53f, 1.05f,
       30.f, 26.f, 3.4f, 0.55f,
       ENG_BOXER4T, 410.f, 4000.f, 850.f, 6900.f, 3600.f, 0.45f,
@@ -24,7 +24,7 @@ static const VehicleSpec VEHICLES[V_COUNT] = {
       0.78f, 2.1f, 0.62f, 0.50f, 0.17f,
       3.0f, 0.35f, 1.18f, 0.0f, COCKPIT_RALLY,
       V_STI, 0.f, 0.80f, 0.85f, 0.35f },
-    { "OLD JEEP 4.0", "JEEP", "1993 4.0 SIX. PART-TIME 4X4.", "LEAVE THE ROAD + LOW RANGE + WADE", false,
+    { "OLD JEEP 4.0", "JEEP", "1993 4.0 SIX. PART-TIME 4X4.", "LEAVE THE ROAD, LOW RANGE, WADE", false,
       1520.f, 2.37f, 0.54f, 0.78f, 1.48f, 1.10f,
       34.f, 17.f, 1.8f, 0.30f,
       ENG_I6, 310.f, 2800.f, 700.f, 5000.f, 2000.f, 0.f,
@@ -34,7 +34,7 @@ static const VehicleSpec VEHICLES[V_COUNT] = {
       1.20f, 1.25f, 0.24f, 0.62f, 0.30f,
       45.f, 0.85f, 1.62f, 0.0f, COCKPIT_JEEP,
       V_STI, 20.f, 0.45f, 0.60f, 0.85f },
-    { "STINGRAY BAJA", "VETTE", "LIFTED V8 ON ALL-TERRAINS. RWD.", "SHORTCUTS + DONUTS + 200 MPH", false,
+    { "STINGRAY BAJA", "VETTE", "LIFTED V8 ON ALL-TERRAINS. RWD.", "SHORTCUTS, DONUTS, 200 MPH", false,
       1450.f, 2.49f, 0.50f, 0.66f, 1.58f, 1.0f,
       32.f, 30.f, 3.9f, 0.30f,
       ENG_V8, 640.f, 4400.f, 750.f, 6400.f, 3000.f, 0.f,

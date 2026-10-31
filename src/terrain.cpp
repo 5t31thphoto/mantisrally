@@ -344,11 +344,12 @@ static void spawnStore(int dir) {
     float half = n.half20 * 0.05f;
     float rx = -sinf(n.yaw), rz = cosf(n.yaw);
     s_store.active = true; s_store.s = n.s;
-    s_store.x = n.x + rx * side * (half + 17.f);
-    s_store.z = n.z + rz * side * (half + 17.f);
+    s_store.x = n.x + rx * side * (half + 12.f);           // right beside the road
+    s_store.z = n.z + rz * side * (half + 12.f);
     s_store.yaw = n.yaw;
     g.sinceStore = 0.f; g.nextStore = MILE * (3.5f + 2.5f * hashf(g.rng + 31));
     s_storeReq = false;
+    rebakeAround(s_store.x, s_store.z, 48.f);               // its gravel lot and a clear frontage, even if that land was already dreamt
 }
 
 // The road never crosses itself: if a new node comes near the road's own body, it bends away.
@@ -387,8 +388,9 @@ static void extend(int dir, bool facing) {
     if (!facing) return;
     bool calm = fabsf(g.curv) < 1.f / 140.f && g.pending == 0 && g.seg != SEG_HAIRPIN;
     if (!s_junc.active && g.sinceJunc > g.nextJunc && calm) spawnJunction(dir);
+    // the store only goes on the road you are actually on: never while a fork ahead is undecided
     else if (!s_store.active && calm && g.sinceStore > g.nextStore * (s_storeReq ? 0.35f : 1.f)
-             && (!s_junc.active || fabsf(n.s - s_junc.s) > 400.f)) spawnStore(dir);
+             && (!s_junc.active || (s_junc.decided && fabsf(n.s - s_junc.s) > 400.f))) spawnStore(dir);
 }
 
 static void dropBack() { s_base = (s_base + 1) & RM; s_cnt--; s_carIdx--; }
@@ -470,6 +472,7 @@ static uint8_t pickVeg(float x, float z, int ci, int cj, uint8_t mat, float aRoa
     const Land& L = journeyLand();
     if (mat == MAT_ROAD || mat == MAT_SHOULDER || mat == MAT_LOT || mat == MAT_WATER) return VEG_NONE;
     if (aRoad < half + 3.2f) return VEG_NONE;
+    if (s_store.active && sq(x - s_store.x) + sq(z - s_store.z) < 46.f * 46.f) return VEG_NONE;   // nothing hides the dealership
     uint32_t h = hash32((uint32_t)ci * 73856093u ^ (uint32_t)cj * 19349663u ^ s_seed);
     float cl = vnoise2(x * 0.011f, z * 0.011f, s_seed + 0x5E);            // groves and clearings
     float grove = smooth01((cl - 0.22f) * 2.2f) * 1.25f;
@@ -560,7 +563,8 @@ static void bakeCell(Grid& g, int ci, int cj) {
     else {                                                        // far: forest canopy height in metres
         float cl = vnoise2(x * 0.011f, z * 0.011f, s_seed + 0x5E);
         float dens = (L.pine + L.broad + L.redwood * 1.5f) * smooth01((cl - 0.22f) * 2.2f);
-        c.extra = (dens > 0.35f && mat != MAT_ROCK && fabsf(across) > half + 6.f) ? (uint8_t)clampf(5.f + dens * 6.f + L.redwood * 12.f, 0.f, 22.f) : 0;
+        bool nearStore = s_store.active && sq(x - s_store.x) + sq(z - s_store.z) < 60.f * 60.f;
+        c.extra = (!nearStore && dens > 0.35f && mat != MAT_ROCK && fabsf(across) > half + 6.f) ? (uint8_t)clampf(5.f + dens * 6.f + L.redwood * 12.f, 0.f, 22.f) : 0;
     }
 #ifdef DEBUG_BAKE
     if (&g == &s_near) { int k = gridWrap(cj, g.N) * g.N + gridWrap(ci, g.N); g_dbgRoadY[k] = road ? rh.y : -999.f; g_dbgWhen[k] = g_dbgFrame; g_dbgHit[k] = road ? (rh.arm ? 1000 + rh.idx : rh.idx) : -1; }
@@ -709,6 +713,15 @@ void terrainUpdate(float carX, float carZ, float carYaw, float speed, float dt) 
             bool arm = ha && (!hm || a.dist < m.dist);
             if (arm) takeArm();
             s_junc.decided = true;
+            // a store left on the road not taken is gone; the next one comes soon on this road
+            if (s_store.active) {
+                RoadHit sh;
+                if (!roadNearest(s_store.x, s_store.z, sh, 60.f) || sh.arm) {
+                    s_store.active = false;
+                    Gen& g = s_junc.dir > 0 ? s_gF : s_gB;
+                    g.sinceStore = g.nextStore;
+                }
+            }
             s_juncEvent = true; s_juncTookArm = arm;
             journeyFollowRoad(arm ? s_junc.destArm : s_junc.destMain);
         }

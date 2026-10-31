@@ -29,8 +29,8 @@ struct Ping {
     uint32_t ph = 0;
     float dph = 0, mul = 1, env = 0, dec = 0, amp = 0, rev = 0.15f;
 };
-static Grain s_gr[28];
-static Ping s_pg[12];
+static Grain s_gr[40];
+static Ping s_pg[16];
 
 static inline float decFor(float tauSec) { return expf(-1.f / (tauSec * dsp::SR)); }
 
@@ -108,6 +108,53 @@ static void shotsBlock(Bus& b, int n) {
 }
 
 // ================= bumps, critters =================
+// ---- impacts (the rally) ----
+void natureImpact(uint8_t kind, float st) {
+    float a = clampf(st, 0.15f, 1.f);
+    switch (kind) {
+        case IMP_TREE:                                        // a hollow wooden knock, the trunk shudders, leaves rain down
+            grain(0.f, 1, 420.f, 160.f, 2.f, 0.002f, 0.09f, 0.42f * a, 0.25f);
+            ping(0.f, 210.f, 0.82f, 0.08f, 0.14f, 0.28f * a, 0.3f);
+            ping(0.004f, 345.f, 0.9f, 0.05f, 0.09f, 0.14f * a, 0.3f);
+            grain(0.03f, 0, 2600.f, 1900.f, 0.8f, 0.03f, 0.18f, 0.10f * a, 0.35f);
+            for (int i = 0; i < 4; i++) grain(0.2f + i * (0.09f + rng.uni() * 0.1f), 0, 2300.f + rng.uni() * 900.f, 1800.f, 0.9f, 0.015f, 0.05f, (0.05f - i * 0.008f) * a, 0.35f);
+            break;
+        case IMP_ROCK:                                        // a hard crack, then steel scraping on stone
+            grain(0.f, 0, 3800.f, 2400.f, 1.4f, 0.f, 0.012f, 0.5f * a, 0.15f);
+            grain(0.f, 1, 700.f, 250.f, 1.5f, 0.002f, 0.07f, 0.32f * a, 0.2f);
+            ping(0.f, 1650.f, 0.97f, 0.1f, 0.12f, 0.08f * a, 0.25f);
+            grain(0.02f, 0, 2700.f, 2100.f, 3.f, 0.03f, 0.22f, 0.14f * a, 0.2f);
+            break;
+        case IMP_DEER:                                        // a comedic thud... and a wet splat... and a drip or two
+            grain(0.f, 1, 520.f, 140.f, 1.2f, 0.003f, 0.08f, 0.5f, 0.2f);
+            ping(0.f, 150.f, 0.55f, 0.09f, 0.1f, 0.36f, 0.2f);
+            grain(0.06f, 1, 2600.f, 260.f, 1.4f, 0.006f, 0.16f, 0.32f, 0.3f);
+            grain(0.09f, 0, 1300.f, 500.f, 2.5f, 0.01f, 0.09f, 0.16f, 0.3f);
+            ping(0.38f, 1150.f, 1.25f, 0.05f, 0.05f, 0.05f, 0.4f);
+            ping(0.61f, 980.f, 1.3f, 0.05f, 0.05f, 0.035f, 0.4f);
+            break;
+        case IMP_CRUNCH: {                                    // landing too fast: panels fold, the floor slams, bits rattle off
+            grain(0.f, 1, 380.f, 90.f, 1.2f, 0.002f, 0.14f, 0.55f * a, 0.2f);
+            int n = 6 + (int)(a * 10.f);
+            float t = 0.f;
+            for (int i = 0; i < n; i++) {
+                t += 0.008f + rng.uni() * 0.03f * (1.f + i * 0.15f);
+                grain(t, 0, 1200.f + rng.uni() * 2200.f, 900.f + rng.uni() * 900.f, 2.f + rng.uni() * 3.f, 0.f, 0.012f + rng.uni() * 0.02f, (0.32f - i * 0.015f) * a, 0.18f);
+            }
+            ping(0.01f, 720.f, 0.94f, 0.2f, 0.22f, 0.07f * a, 0.3f);
+            for (int i = 0; i < 4; i++) grain(0.25f + i * (0.06f + rng.uni() * 0.08f), 0, 3000.f + rng.uni() * 1500.f, 2500.f, 2.f, 0.f, 0.01f, 0.08f * a * (1.f - i * 0.2f), 0.25f);
+            break;
+        }
+        case IMP_WIPE:                                        // the wiper: a soft rubber swish across the glass
+            grain(0.f, 0, 1500.f, 900.f, 0.9f, 0.18f, 0.16f, 0.035f, 0.1f);
+            break;
+        case IMP_WIPE_DEER:                                   // ...a slow, deliberate wipe, with the faintest squeak at the end
+            grain(0.f, 0, 1300.f, 800.f, 0.9f, 0.35f, 0.3f, 0.04f, 0.1f);
+            ping(0.62f, 1850.f, 0.88f, 0.12f, 0.07f, 0.018f, 0.1f);
+            break;
+    }
+}
+
 void natureBump(uint8_t kind) {
     ping(0.f, 145.f, 0.6f, 0.1f, 0.08f, 0.38f, 0.2f);
     grain(0.f, 0, 380.f, 300.f, 0.9f, 0.002f, 0.05f, 0.2f);

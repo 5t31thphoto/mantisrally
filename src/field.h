@@ -6,19 +6,21 @@
 
 namespace mantis {
 
-enum : uint8_t { PK_DUST = 0, PK_MUD, PK_SPRAY, PK_SNOW, PK_GRAVEL, PK_SMOKE };
+enum : uint8_t { PK_DUST = 0, PK_MUD, PK_SPRAY, PK_SNOW, PK_GRAVEL, PK_SMOKE, PK_FUR, PK_MIST };
 struct Particle { float x, y, z, vx, vy, vz, life, age, size; uint8_t kind; };
 constexpr int PART_N = 72;
 
-struct Critter { bool on; float x, z, y, yaw, speed, t, fear; uint8_t kind, pose; };
+struct Critter { bool on; float x, z, y, yaw, speed, t, fear; uint8_t kind, pose; bool dodger; };
 constexpr int CRIT_N = 6;
 
 struct Bird { bool on; float az, el, vaz, t; int n; };
 
 void fieldInit(uint32_t seed);
 void fieldUpdate(const VehicleState& car, uint8_t vehicle, float dt);
-// solid things near the car: trees, rocks, the dealership. Returns the hardest impact (m/s).
-float fieldCollide(VehicleState& car, uint8_t vehicle);
+// solid things near the car: trees, rocks, the dealership, deer. Reports the hardest impact (m/s) and what it was.
+enum : uint8_t { HIT_NONE = 0, HIT_TREE, HIT_ROCK, HIT_STORE, HIT_DEER };
+struct FieldHit { float strength; uint8_t kind; };
+FieldHit fieldCollide(VehicleState& car, uint8_t vehicle);
 void fieldEmit(uint8_t kind, float x, float y, float z, float vx, float vy, float vz, float size, float life);
 void fieldHorn(float x, float z);
 

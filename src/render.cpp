@@ -951,7 +951,7 @@ static void drawSignAndStore() {
     if (st && st->active) {
         float h = terrainHeight(st->x, st->z);
         float sx, sy, d;
-        if (renderProject(st->x, h, st->z, sx, sy, d) && d < 300.f) blitTpl(T_STORE, sx, sy + 1.f, 10.f * F / d, d, false, false, 0.f);
+        if (renderProject(st->x, h, st->z, sx, sy, d) && d < 460.f) blitTpl(T_STORE, sx, sy + 1.f, 13.f * F / d, d, false, false, 0.f);
     }
 }
 
@@ -978,12 +978,14 @@ static void drawParticles() {
         uint8_t c;
         switch (p[k].kind) {
             case PK_MUD: c = P_MUD; break;
+            case PK_FUR: c = (uint8_t)(P_BARK + 5 + (k & 1)); break;
+            case PK_MIST: c = (uint8_t)(P_FLOWER + 3); break;
             case PK_SPRAY: c = P_HAZE + 12; break;
             case PK_SNOW: c = P_SNOW + 6; break;
             case PK_SMOKE: c = P_HAZE + 13; break;
             default: c = (uint8_t)(P_SOIL + 10); break;
         }
-        bool puff = p[k].kind == PK_DUST || p[k].kind == PK_SMOKE;
+        bool puff = p[k].kind == PK_DUST || p[k].kind == PK_SMOKE || p[k].kind == PK_MIST;
         // puffs thin out as they grow and age, and near the lens they are mostly air
         float dens = puff ? fade * 0.45f * clampf(d / 6.f, 0.15f, 1.f) : 1.f;
         int R = (int)(r + 0.5f);
@@ -1274,6 +1276,67 @@ void renderWater(float strength) {
         s.x = (float)(h % W); s.y = (float)((h >> 8) % 90); s.r = 1.f + strength * 1.5f; s.life = 1.5f; s.kind = 1; return;
     }
 }
+// ---- the wipers (cockpit, cars): rain and wet glass, and one slow wipe after a deer
+static float s_wipT = -1.f, s_wipLen = 1.f, s_wipPause = 0.f, s_wipAng = 0.f, s_deerWipeIn = -1.f;
+static bool s_wipDeer = false, s_wipEvent = false, s_wipEventDeer = false;
+static constexpr float WIPE_REST = 0.12f, WIPE_TOP = 2.55f;          // radians: lying right, up to the left pillar
+void renderDeerSplat() {
+    for (int k = 0; k < 9; k++) for (Splat& s : s_spl) if (s.life <= 0.f) {
+        uint32_t h = hash32((uint32_t)(s_t * 1000.f) + k * 977u);
+        s.x = W * 0.3f + (h % 64); s.y = 24.f + ((h >> 8) % 44); s.r = 1.f + ((h >> 16) & 1); s.life = 30.f; s.kind = 2; break;
+    }
+    s_deerWipeIn = 0.9f;                                            // a beat... then the wipe
+}
+bool renderWipeEvent(bool& deer) { bool e = s_wipEvent; deer = s_wipEventDeer; s_wipEvent = false; return e; }
+static float wiperAngle(float t, float len) {                      // up and back, easing at both ends
+    float ph = t / len;
+    float u = ph < 0.5f ? ph * 2.f : (1.f - ph) * 2.f;
+    u = u * u * (3.f - 2.f * u);
+    return WIPE_REST + (WIPE_TOP - WIPE_REST) * u;
+}
+static void drawWipers() {
+    const ViewInfo& v = g_view;
+    float dt = g_scene.dt;
+    if (v.view != VIEW_COCKPIT || v.vehicle == V_BIKE) { s_wipT = -1.f; s_deerWipeIn = -1.f; return; }
+    bool wet = g_scene.rain > 0.1f || g_scene.snow > 0.3f;
+    if (s_deerWipeIn > 0.f) { s_deerWipeIn -= dt; if (s_deerWipeIn <= 0.f && s_wipT < 0.f) { s_wipT = 0.f; s_wipLen = 1.7f; s_wipDeer = true; s_wipEvent = true; s_wipEventDeer = true; } }
+    if (s_wipT < 0.f && wet) {
+        s_wipPause -= dt;
+        if (s_wipPause <= 0.f) { s_wipT = 0.f; s_wipLen = 1.05f; s_wipDeer = false; s_wipEvent = true; s_wipEventDeer = false; }
+    }
+    float prev = s_wipAng;
+    if (s_wipT >= 0.f) {
+        s_wipT += dt;
+        if (s_wipT >= s_wipLen) {
+            s_wipT = -1.f; s_wipAng = WIPE_REST;
+            float r = g_scene.rain + g_scene.snow * 0.5f;
+            s_wipPause = r > 0.5f ? 0.05f : (r > 0.25f ? 1.2f : 3.5f);   // heavy: continuous; light: intermittent
+        } else s_wipAng = wiperAngle(s_wipT, s_wipLen);
+    } else s_wipAng = WIPE_REST;
+    const int pv[2] = {(int)(W * 0.30f), (int)(W * 0.68f)};
+    const float L = W * 0.40f;
+    float a0 = fminf(prev, s_wipAng), a1 = fmaxf(prev, s_wipAng);
+    for (int w = 0; w < 2; w++) {
+        float px = (float)pv[w], py = (float)s_bottomCock[pv[w]] - 1.f;
+        // the glass it passes over is clean again
+        for (Splat& sp : s_spl) {
+            if (sp.life <= 0.f) continue;
+            float dx = sp.x - px, dy = py - sp.y;
+            float r = sqrtf(dx * dx + dy * dy), a = atan2f(dy, dx);
+            if (r < L + 2.f && a >= a0 - 0.05f && a <= a1 + 0.05f) sp.life = 0.f;
+        }
+        // arm and blade (parked out of sight below the glass when they're not sweeping)
+        if (s_wipT < 0.f) continue;
+        float ca = cosf(s_wipAng), sa = sinf(s_wipAng);
+        for (float t = 0.f; t < L; t += 0.7f) {
+            int x = (int)(px + ca * t), y = (int)(py - sa * t);
+            if ((unsigned)x >= (unsigned)W || (unsigned)y >= (unsigned)H) continue;
+            fb[y * W + x] = P_BLACK;
+            if (t > L * 0.3f) { int x2 = (int)(px + ca * t - sa), y2 = (int)(py - sa * t - ca); if ((unsigned)x2 < (unsigned)W && (unsigned)y2 < (unsigned)H) fb[y2 * W + x2] = P_BLACK; }
+        }
+    }
+}
+
 static void drawGlass() {
     float dt = g_scene.dt;
     if (g_view.view == VIEW_COCKPIT && g_scene.rain > 0.1f && hashf((uint32_t)(s_t * 60.f)) < g_scene.rain * 0.6f) renderWater(0.3f);
@@ -1287,6 +1350,7 @@ static void drawGlass() {
             int x = (int)s.x + dx, y = (int)s.y + dy;
             if ((unsigned)x >= (unsigned)W || (unsigned)y >= (unsigned)H) continue;
             if (s.kind == 0) { if (s.life > 1.f || dith(x, y) < s.life) fb[y * W + x] = (dx * dx + dy * dy < R * R / 3) ? P_MUD : (((x ^ y) & 1) ? P_MUD : fb[y * W + x]); }
+            else if (s.kind == 2) { if ((dx + dy) & 1 || R < 2) fb[y * W + x] = (uint8_t)(P_FLOWER + 3 + ((x * 7 + y) & 1)); }
             else fb[y * W + x] = s_bright[fb[y * W + x]];
         }
     }
@@ -1312,10 +1376,12 @@ static void drawHud() {
     // the pace note (the STI's co-driver)
     if (v.paceA > 0.1f) {
         char p[8];
-        if (v.paceDir == 0) snprintf(p, sizeof p, "CREST");
-        else snprintf(p, sizeof p, "%s%s%d", v.paceDir < 0 ? "<" : "", v.paceSev == 1 ? "H" : "", v.paceSev);
-        if (v.paceDir > 0) { size_t n = strlen(p); p[n] = '>'; p[n + 1] = 0; }
-        hudText(4, 4, p, v.paceSev <= 2 ? P_HUD_R : P_HUD_A, 2);
+        if (v.paceDir == 0) hudText(4, 4, "CREST", P_HUD_A);             // crests: the small call
+        else {
+            snprintf(p, sizeof p, "%s%s%d", v.paceDir < 0 ? "<" : "", v.paceSev == 1 ? "H" : "", v.paceSev);
+            if (v.paceDir > 0) { size_t n = strlen(p); p[n] = '>'; p[n + 1] = 0; }
+            hudText(4, 4, p, v.paceSev <= 2 ? P_HUD_R : P_HUD_A, 2);
+        }
         if (v.paceCrest && v.paceDir != 0) hudText(4, 16, "CREST", P_HUD_A);
     }
     // a fork ahead: where each side goes
@@ -1454,6 +1520,7 @@ void renderFrame() {
     drawSnow();
     drawLeaves();
     if (g_view.view == VIEW_CHASE) drawChaseVehicle();
+    drawWipers();                                   // before the dash, which hides their pivots
     if (g_view.view == VIEW_COCKPIT) drawCockpit();
     drawGlass();
     drawHud();

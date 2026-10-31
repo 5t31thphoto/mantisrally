@@ -51,6 +51,7 @@ static void spawnDeer(const VehicleState& car) {
         Ground g; terrainGround(x, z, g);
         if (g.mat == MAT_WATER || g.mat == MAT_ROCK) return;
         c.on = true; c.x = x; c.z = z; c.y = g.h; c.kind = 0; c.pose = 3; c.fear = 0.f; c.speed = 0.f;
+        c.dodger = frand() < 0.8f;                                  // most leap clear at the last moment
         c.yaw = frand() * 6.283f; c.t = 0.f;
         // sometimes a small group
         if (frand() < 0.35f) for (Critter& d2 : s_c) if (!d2.on) { d2 = c; d2.x += (frand() - 0.5f) * 6.f; d2.z += (frand() - 0.5f) * 6.f; d2.yaw += frand() - 0.5f; break; }
@@ -64,11 +65,12 @@ void fieldUpdate(const VehicleState& car, uint8_t vehicle, float dt) {
         if (p.life <= 0.f) continue;
         p.age += dt;
         if (p.age >= p.life) { p.life = 0.f; continue; }
-        float drag = p.kind == PK_DUST || p.kind == PK_SMOKE ? 1.6f : 0.4f;
+        float drag = (p.kind == PK_DUST || p.kind == PK_SMOKE) ? 1.6f : (p.kind == PK_FUR ? 2.2f : (p.kind == PK_MIST ? 3.f : 0.4f));
         p.vx -= p.vx * drag * dt; p.vz -= p.vz * drag * dt;
-        p.vy += (p.kind == PK_DUST || p.kind == PK_SMOKE ? 0.6f - p.vy * 1.5f : -9.8f) * dt;
+        p.vy += (p.kind == PK_DUST || p.kind == PK_SMOKE || p.kind == PK_MIST ? 0.6f - p.vy * 1.5f : (p.kind == PK_FUR ? -1.6f - p.vy * 1.2f : -9.8f)) * dt;
         p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
         if (p.kind == PK_DUST || p.kind == PK_SMOKE) p.size += dt * 0.9f;
+        if (p.kind == PK_MIST) p.size += dt * 2.2f;
     }
     // what the wheels throw
     const VehicleSpec& V = vehicleSpec(vehicle);
@@ -111,6 +113,13 @@ void fieldUpdate(const VehicleState& car, uint8_t vehicle, float dt) {
         float d = sqrtf(dx * dx + dz * dz);
         if (d > 260.f) { c.on = false; continue; }
         if (d < 26.f + car.speed * 0.8f) c.fear = fmaxf(c.fear, 0.7f);
+        // a car bearing down: a last-moment leap sideways, clear of its path
+        float fx = cosf(car.yaw), fz = sinf(car.yaw);
+        float ahead = dx * fx + dz * fz, lat = -dx * fz + dz * fx;           // the deer, in the car's frame
+        if (c.dodger && ahead > 0.f && ahead < 4.f + car.speed * 0.35f && fabsf(lat) < 3.f) {
+            c.yaw = car.yaw + (lat >= 0.f ? 1.5708f : -1.5708f);
+            c.speed = 15.f; c.fear = 1.f;
+        }
         if (c.fear > 0.3f) {
             float away = atan2f(dz, dx) + sinf(c.t * 0.7f + c.x) * 0.5f;
             c.yaw += clampf(wrapPi(away - c.yaw), -3.f * dt, 3.f * dt);
@@ -134,32 +143,40 @@ void fieldUpdate(const VehicleState& car, uint8_t vehicle, float dt) {
     }
 }
 
-float fieldCollide(VehicleState& car, uint8_t vehicle) {
-    float hit = 0.f;
+FieldHit fieldCollide(VehicleState& car, uint8_t vehicle) {
+    FieldHit out = {0.f, HIT_NONE};
     const Grid& g = terrainNear();
     int ci = (int)floorf(car.x * g.inv), cj = (int)floorf(car.z * g.inv);
     for (int j = cj - 2; j <= cj + 2; j++) for (int i = ci - 2; i <= ci + 2; i++) {
         Veg v;
         if (!vegAt(i, j, v) || v.radius <= 0.f) continue;
         if (car.y - car.comp > v.y + v.size + 0.5f) continue;        // flying over a boulder
-        float r = v.radius;
-        hit = fmaxf(hit, vehicleHitPost(car, vehicle, v.x, v.z, r));
+        float h = vehicleHitPost(car, vehicle, v.x, v.z, v.radius);
+        if (h > out.strength) { out.strength = h; out.kind = v.type == VEG_BOULDER ? HIT_ROCK : HIT_TREE; }
     }
     const Store* st = roadStore();
     if (st && st->active) {
-        // the building sits at the back of the lot
-        float bx = st->x + (-sinf(st->yaw)) * 0.f, bz = st->z;
-        float dx = car.x - bx, dz = car.z - bz;
-        float along = dx * cosf(st->yaw) + dz * sinf(st->yaw);
-        float lat = -dx * sinf(st->yaw) + dz * cosf(st->yaw);
-        (void)along; (void)lat;
-        hit = fmaxf(hit, vehicleHitPost(car, vehicle, bx, bz, 5.5f));
+        float h = vehicleHitPost(car, vehicle, st->x, st->z, 5.5f);
+        if (h > out.strength) { out.strength = h; out.kind = HIT_STORE; }
     }
-    for (Critter& c : s_c) if (c.on) {                               // deer always leap clear
-        float d = hypotf(c.x - car.x, c.z - car.z);
-        if (d < 4.f) { c.fear = 1.f; c.speed = 14.f; }
+    // deer: rarely, one doesn't make it. A puff of fur, a brief light-red mist, and it's gone.
+    float cy = cosf(car.yaw), sy = sinf(car.yaw);
+    for (Critter& c : s_c) {
+        if (!c.on) continue;
+        float dx = c.x - car.x, dz = c.z - car.z;
+        if (dx * dx + dz * dz > 2.0f * 2.0f || car.speed < 3.f) continue;
+        c.on = false;
+        float wx = cy * car.u - sy * car.v, wz = sy * car.u + cy * car.v;
+        // it bursts up and forward over the bonnet, carried on with the car for a moment (seen from the seat)
+        float bx = car.x + cy * 3.f, bz = car.z + sy * 3.f, by = c.y + 1.2f;
+        for (int k = 0; k < 18; k++)
+            fieldEmit(PK_FUR, bx + (frand() - 0.5f), by + frand() * 0.6f, bz + (frand() - 0.5f), wx * 0.95f + (frand() - 0.5f) * 5.f, 2.5f + frand() * 3.5f, wz * 0.95f + (frand() - 0.5f) * 5.f, 0.08f, 1.2f + frand() * 0.8f);
+        for (int k = 0; k < 6; k++)
+            fieldEmit(PK_MIST, bx + (frand() - 0.5f) * 1.5f, by + 0.3f + frand() * 0.5f, bz + (frand() - 0.5f) * 1.5f, wx * 0.9f + (frand() - 0.5f) * 2.f, 1.2f, wz * 0.9f + (frand() - 0.5f) * 2.f, 0.4f, 0.32f + frand() * 0.15f);
+        car.u *= 0.88f;
+        if (car.speed > out.strength) { out.strength = car.speed; out.kind = HIT_DEER; }
     }
-    return hit;
+    return out;
 }
 
 }

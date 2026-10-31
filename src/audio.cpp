@@ -14,7 +14,7 @@ namespace snd { dsp::Rng rng; }
 using namespace snd;
 
 // ---------------- game -> audio events: single producer, single consumer ----------------
-enum : uint8_t { EV_ENG, EV_THUNDER, EV_CRITTER, EV_NBUMP };
+enum : uint8_t { EV_ENG, EV_THUNDER, EV_CRITTER, EV_NBUMP, EV_IMPACT };
 struct Ev { uint8_t type, a; float x, y; };
 static Ev s_q[32];
 static volatile uint32_t s_head = 0, s_tail = 0;
@@ -34,6 +34,7 @@ static void drain() {
             case EV_THUNDER: natureThunder(e.x, e.y, 1.f - e.x / 7.f); break;
             case EV_CRITTER: natureCritter(e.a, e.x); break;
             case EV_NBUMP: natureBump(e.a); break;
+            case EV_IMPACT: natureImpact(e.a, e.x); break;
         }
         t = (t + 1) & 31u;
         __atomic_store_n(&s_tail, t, __ATOMIC_RELEASE);
@@ -45,8 +46,9 @@ void sfxShift(int d) { post({EV_ENG, EE_SHIFT, (float)d, 0}); }
 void sfxHorn() { post({EV_ENG, EE_HORN, 0, 0}); }
 void sfxThunder(float delay, float power) { post({EV_THUNDER, 0, delay, power}); }
 void sfxSplash(float s) { post({EV_ENG, EE_SPLASH, s, 0}); }
-void sfxCrash(float s, bool tree) { post({EV_ENG, EE_CRASH, s, 0}); post({EV_NBUMP, (uint8_t)(tree ? BUMP_TREE : BUMP_ROCK), 0, 0}); }
+void sfxCrash(float s, bool tree) { post({EV_ENG, EE_CRASH, s, 0}); (void)tree; }   // the body's thump; what it hit is sfxImpact
 void sfxCritter(uint8_t kind, float dist) { post({EV_CRITTER, kind, dist, 0}); }
+void sfxImpact(uint8_t kind, float s) { post({EV_IMPACT, kind, s, 0}); }
 void sfxUi(uint8_t kind) { post({EV_ENG, EE_UI, (float)kind, 0}); }
 
 // ---------------- master bus ----------------

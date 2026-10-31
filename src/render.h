@@ -39,6 +39,8 @@ void renderFrame();
 bool renderProject(float wx, float wy, float wz, float& sx, float& sy, float& depth);
 void renderSplat(float strength);               // mud on the glass / lens
 void renderWater(float strength);               // spray on the glass
+void renderDeerSplat();                         // light-red specks on the glass, then one slow wipe
+bool renderWipeEvent(bool& deerWipe);           // a wiper sweep just started (for its sound)
 
 const uint8_t*  frameBuffer();
 bool            renderDepthFast();       // the depth buffer got internal RAM

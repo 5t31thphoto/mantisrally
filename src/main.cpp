@@ -33,6 +33,7 @@ static char msgBuf[48], subBuf[48];
 static float msgT = 0.f;
 static float paceA = 0.f; static PaceNote pace;
 static float storeStopT = 0.f, storeHintT = 0.f, storeReqT = 0.f;
+static bool storeArmed = true;
 static char juncL[24], juncR[24];
 static bool offRoadMsgShown = false;
 
@@ -136,14 +137,24 @@ void loop() {
     if (veh == V_STI && car.speed < 0.5f && in.brake > 0.2f && helmThrottle() > 0.f) in.throttle = 0.f;
     float px = car.x, pz = car.z;
     vehicleStep(car, veh, in, dt);
-    float hit = fieldCollide(car, veh);
-    if (hit > 2.f) { sfxCrash(hit, true); hx::bump(fminf(1.f, hit / 12.f)); if (hit > 6.f) renderSplat(0.6f); }
+    FieldHit hit = fieldCollide(car, veh);
+    if (hit.kind == HIT_DEER) {
+        sfxImpact(IMP_DEER, 1.f); hx::bump(0.6f);
+        if (g_prog.view == VIEW_COCKPIT) renderDeerSplat();
+    } else if (hit.strength > 2.f) {
+        sfxImpact(hit.kind == HIT_TREE ? IMP_TREE : IMP_ROCK, fminf(1.f, hit.strength / 14.f));
+        sfxCrash(hit.strength, hit.kind == HIT_TREE);
+        hx::bump(fminf(1.f, hit.strength / 12.f));
+        if (hit.strength > 6.f) renderSplat(0.6f);
+    }
     float moved = sqrtf((car.x - px) * (car.x - px) + (car.z - pz) * (car.z - pz));
     if (moved > 20.f) moved = 0.f;
     distance += moved;
     progressDrive(moved);
     // events from the chassis
-    if (car.evLand > 1.2f) { sfxLand(fminf(1.f, car.evLand / 8.f)); hx::bump(fminf(1.f, car.evLand / 7.f)); }
+    if (car.evLand > 6.f) {                                   // came down hard and fast: the crunch
+        sfxImpact(IMP_CRUNCH, fminf(1.f, (car.evLand - 4.f) / 8.f)); sfxLand(1.f); hx::bump(1.f);
+    } else if (car.evLand > 1.2f) { sfxLand(fminf(1.f, car.evLand / 8.f)); hx::bump(fminf(1.f, car.evLand / 7.f)); }
     if (car.evBottom > 1.f) { sfxBump(fminf(1.f, car.evBottom / 5.f)); hx::bump(fminf(1.f, car.evBottom / 6.f)); }
     else if (car.evBump > 0.35f) { sfxBump(car.evBump); }
     if (car.evShift != 0.f) { sfxShift(car.evShift > 0 ? 1 : -1); hx::kick(0.35f); }
@@ -153,7 +164,9 @@ void loop() {
 
     // ---------------- the road, off-road, water ----------------
     float band = g_prog.offroadOn ? 999.f : V.offroadBand;
-    float off = fabsf(car.across) - car.half;
+    float off = car.mat == MAT_LOT ? 0.f : fabsf(car.across) - car.half;    // the dealership's lot counts as road
+    {   const Store* sn = roadStore();                       // ...and so does pulling in to it
+        if (sn->active && (sn->x - car.x) * (sn->x - car.x) + (sn->z - car.z) * (sn->z - car.z) < 40.f * 40.f) off = 0.f; }
     bool onRoad = off < 30.f;
     if (off > band) {
         if (!offRoadMsgShown && veh == V_JEEP) { message("TOO FAR FROM THE ROAD", nullptr, 1.5f); offRoadMsgShown = true; }
@@ -210,7 +223,8 @@ void loop() {
         float dx = st->x - car.x, dz = st->z - car.z;
         float d = sqrtf(dx * dx + dz * dz);
         if (d < 400.f && d > 40.f && dx * cosf(car.yaw) + dz * sinf(car.yaw) > 0.f) storeA = 1.f;
-        if (d < 26.f && car.speed < STORE_STOP_SPEED) { storeStopT += dt; if (storeStopT > 0.6f || ev.tap) { storeOpen(); storeStopT = 0.f; sfxUi(UI_OK); car.u = car.v = 0.f; } }
+        if (d > 45.f) storeArmed = true;                    // re-arms once you've driven away from it
+        if (storeArmed && d < 26.f && car.speed < STORE_STOP_SPEED) { storeStopT += dt; if (storeStopT > 0.6f || ev.tap) { storeOpen(); storeArmed = false; storeStopT = 0.f; sfxUi(UI_OK); car.u = car.v = 0.f; } }
         else storeStopT = 0.f;
     }
     (void)storeHintT;
@@ -257,6 +271,7 @@ void loop() {
     if (msgT > 0.f) msgT -= dt;
     (void)g;
     renderFrame();
+    { bool deerWipe; if (renderWipeEvent(deerWipe)) sfxImpact(deerWipe ? IMP_WIPE_DEER : IMP_WIPE, 1.f); }
     displayPresent();
 }
 
