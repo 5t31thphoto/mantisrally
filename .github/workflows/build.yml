@@ -58,6 +58,12 @@ jobs:
         with:
           python-version: '3.11.17'
 
+      - name: Host gameplay regression test
+        run: |
+          g++ -O2 -DHOST -I src -I tools/host/stubs tools/host/gameplay_test.cpp \
+            src/universe.cpp src/journey.cpp src/terrain.cpp -lm -o /tmp/gameplay_test
+          /tmp/gameplay_test
+
       - name: Install PlatformIO
         run: pip install platformio==6.1.18 esptool==5.6.0
 
