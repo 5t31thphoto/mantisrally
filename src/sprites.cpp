@@ -5,7 +5,7 @@
 #include "vehicle.h"
 #include "universe.h"
 #include "mem.h"
-#include "store_art.h"
+#include "art.h"
 #include <math.h>
 #include <string.h>
 
@@ -209,6 +209,7 @@ const Tpl& tpl(uint8_t id) { return s_tpl[id % T_TPL_N]; }
 
 void spritesInit() {
     if (s_tpl[0].px) return;
+    art::artInit();                                   // the packed art, into PSRAM (once)
     makePine(T_PINE0, 11, 7, false);
     makePine(T_PINE1, 23, 9, false);
     makePine(T_PINE2, 37, 6, false);

@@ -7,12 +7,12 @@ import numpy as np, os
 from PIL import Image
 from scipy import ndimage
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, '..', '..', 'src', 'cockpit_art.h')
+OUT = os.path.join(HERE, 'raw', 'cockpit_art.h')            # packed into src/art_packed.h by pack_art.py
 PANELS = [(58, 25, 681, 343), (755, 25, 1363, 343), (58, 409, 681, 713), (755, 409, 1363, 713)]
 W, H = 160, 120
 DASH_ROWS = 31                         # how much of the screen the dash may take
 # steering wheel (centre x, y, radius) in output pixels; the bike's bars don't spin
-WHEEL = [(43, 105, 18), (47, 106, 24), (45, 94, 21), None]
+WHEEL = [(43, 105, 18), (47, 105, 27), (45, 94, 21), None]
 from make_vehicles import quantize_palette
 
 def build(box):

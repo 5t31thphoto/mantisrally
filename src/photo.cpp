@@ -3,9 +3,9 @@
 #include "render.h"
 #include "terrain.h"
 #include "display.h"
+#include "art.h"
 #include "storage.h"
 #include "sprites.h"
-#include "store_art.h"
 #include <math.h>
 #include <string.h>
 

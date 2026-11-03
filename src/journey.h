@@ -65,6 +65,7 @@ void    journeyInit(uint32_t seed);
 // Distance travelled this frame, compass yaw, and whether you are following a road.
 void    journeyUpdate(float dist, float yaw, bool onRoad);
 uint8_t journeyCurrent();
+float   journeyMetersToTransition();   // driving before the next biome transition begins (-1: one is underway)
 uint8_t journeyNext();          // the biome you are blending into
 float   journeyBlend();         // 0 = all current .. 1 = all next
 uint8_t journeyDestination();   // the special biome the current road leads to
@@ -75,6 +76,7 @@ uint8_t journeyPickDestination(uint32_t salt, uint8_t avoid);
 uint16_t journeyVisited();      // bit per biome
 void    journeySetVisited(uint16_t mask);
 bool    journeyArrivedEvent();  // true once when the destination is reached
+bool    journeyArrivedPending();          // the arrival hasn't been announced yet
 bool    journeyBiomeEvent();    // true once when a new biome takes over
 void    journeyForce(uint8_t cur, uint8_t next, float blend);   // previews / tests
 const Land& journeyLand();

@@ -16,7 +16,7 @@ struct VehicleSpec {
     const char* name;          // shown in the store
     const char* shortName;     // shown in the garage list
     const char* blurb1;        // store: what it is
-    const char* blurb2;        // store: its trick
+    const char* blurb2;        // store: a hint (never the trick itself: the unlocks are surprises)
     bool bike;
     // chassis
     float mass, wheelbase, frontWeight, cgHeight, track, yawInertiaK;

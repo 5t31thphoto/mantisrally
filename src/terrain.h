@@ -79,7 +79,9 @@ const RoadNode& roadArmNode(int i);
 struct RoadHit { float across, along, y, yaw, half, dist; uint8_t surf; bool arm; int idx; };
 bool roadNearest(float x, float z, RoadHit& h, float maxDist = 1e9f);
 // Put a point back on the nearest road (edge or centre), facing along it nearest to `yaw`.
-bool roadRecover(float& x, float& z, float& yaw, float edge);
+bool roadRecover(float& x, float& z, float& yaw, float edge, int dirAlong = 0);   // dirAlong: +1/-1 along the road, 0 = by heading
+int  roadTravelDir();
+int  roadJunctionArmSide();          // the branch's side as you see it at the split (+1 right, -1 left)                 // which way along the road the car is heading (+1 / -1)
 const Junction* roadJunction();
 const RoadSign* roadSign();
 const Store* roadStore();

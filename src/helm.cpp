@@ -19,7 +19,7 @@ constexpr bool  INVERT_TIP      = false;   // + = top away = throttle
 constexpr uint32_t HOLD_B_MS    = 650;
 constexpr uint32_t MUTE_HOLD_MS = 1500;
 constexpr uint32_t TAP_MS       = 400;
-constexpr uint32_t DOUBLE_MS    = 420;     // the second tap must follow within this
+constexpr uint32_t DOUBLE_MS    = 700;     // first tap's release to the second's release (a real double tap)
 // ======================================================
 
 static float s_steer = 0.f, s_tip = 0.f;
@@ -92,12 +92,12 @@ void helmUpdate(float dt, HelmEvents& ev) {
     bool down = t.isPressed() && t.y < 236 && !(a || b || c);
     if (down && !s_touch) { s_touch = true; s_moved = false; s_muteFired = false; s_tx0 = t.x; s_ty0 = t.y; s_tt0 = now; }
     else if (down && s_touch) {
-        if (abs(t.x - s_tx0) + abs(t.y - s_ty0) > 14) s_moved = true;
+        if (abs(t.x - s_tx0) + abs(t.y - s_ty0) > 24) s_moved = true;      // a finger jitters in a moving car
         if (!s_moved && !s_muteFired && now - s_tt0 > MUTE_HOLD_MS) { s_muteFired = true; ev.mute = true; }
     } else if (!down && s_touch) {
         if (!s_moved && !s_muteFired && now - s_tt0 < TAP_MS) {
             ev.tap = true; ev.tapX = s_tx0; ev.tapY = s_ty0;
-            if (s_lastTap && now - s_lastTap < DOUBLE_MS && abs(s_tx0 - s_ltx) + abs(s_ty0 - s_lty) < 60) { ev.doubleTap = true; s_lastTap = 0; }
+            if (s_lastTap && now - s_lastTap < DOUBLE_MS && abs(s_tx0 - s_ltx) + abs(s_ty0 - s_lty) < 100) { ev.doubleTap = true; s_lastTap = 0; }
             else { s_lastTap = now; s_ltx = s_tx0; s_lty = s_ty0; }
         }
         s_touch = false;

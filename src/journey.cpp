@@ -224,12 +224,15 @@ void journeyUpdate(float dist, float yaw, bool onRoad) {
 }
 
 uint8_t journeyCurrent() { return s_cur; }
+// metres of driving before the next transition starts (-1 while one is underway): a fork must be decided before it
+float journeyMetersToTransition() { return s_trans ? -1.f : (s_len - TRANS) - s_dist; }
 uint8_t journeyNext() { return s_next; }
 float journeyBlend() { return s_blend; }
 uint8_t journeyDestination() { return s_dest; }
 uint16_t journeyVisited() { return s_visited; }
 void journeySetVisited(uint16_t m) { s_visited = (uint16_t)(m | (1u << s_cur)); }
 bool journeyArrivedEvent() { bool a = s_arrived; s_arrived = false; return a; }
+bool journeyArrivedPending() { return s_arrived; }
 bool journeyBiomeEvent() { bool a = s_newBiome; s_newBiome = false; return a; }
 const Land& journeyLand() { return s_land; }
 

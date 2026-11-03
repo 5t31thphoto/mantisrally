@@ -45,10 +45,12 @@ static void message(const char* m, const char* sub = nullptr, float secs = 3.f) 
     msgT = secs;
 }
 
+static float s_onRoadT = -100.f; static int s_roadDir = 0;   // when you were last driving on the road, and which way
 static void placeOnRoad(bool keepPos) {
     float x = car.x, z = car.z, yaw = car.yaw;
     if (!keepPos) { x = 0.f; z = 0.f; }
-    roadRecover(x, z, yaw, 1.5f);
+    int dir = (keepPos && t - s_onRoadT < 30.f) ? s_roadDir : 0;    // lost control on your way somewhere: back on course
+    roadRecover(x, z, yaw, 1.5f, dir);
     vehicleReset(car, veh, x, z, yaw);
 }
 
@@ -172,7 +174,7 @@ void loop() {
         sfxImpact(IMP_DEER, 1.f); hx::bump(0.6f);
         if (g_prog.view == VIEW_COCKPIT) renderDeerSplat();
     } else if (hit.strength > 2.f) {
-        sfxImpact(hit.kind == HIT_TREE ? IMP_TREE : IMP_ROCK, fminf(1.f, hit.strength / 14.f));
+        sfxImpact(hit.kind == HIT_TREE ? IMP_TREE : IMP_ROCK, fminf(3.f, hit.strength / 14.f));   // past 1: a collision
         sfxCrash(hit.strength, hit.kind == HIT_TREE);
         hx::bump(fminf(1.f, hit.strength / 12.f));
         if (hit.strength > 6.f) renderSplat(0.6f);
@@ -183,7 +185,7 @@ void loop() {
     progressDrive(moved);
     // events from the chassis
     if (car.evLand > 6.f) {                                   // came down hard and fast: the crunch
-        sfxImpact(IMP_CRUNCH, fminf(1.f, (car.evLand - 4.f) / 8.f)); sfxLand(1.f); hx::bump(1.f);
+        sfxImpact(IMP_CRUNCH, fminf(2.5f, (car.evLand - 4.f) / 8.f)); sfxLand(1.f); hx::bump(1.f);
     } else if (car.evLand > 1.2f) { sfxLand(fminf(1.f, car.evLand / 8.f)); hx::bump(fminf(1.f, car.evLand / 7.f)); }
     if (car.evBottom > 1.f) { sfxBump(fminf(1.f, car.evBottom / 5.f)); hx::bump(fminf(1.f, car.evBottom / 6.f)); }
     else if (car.evBump > 0.35f) { sfxBump(car.evBump); }
@@ -195,6 +197,7 @@ void loop() {
     // ---------------- the road, off-road, water ----------------
     float band = g_prog.offroadOn ? 999.f : V.offroadBand;
     float off = car.mat == MAT_LOT ? 0.f : fabsf(car.across) - car.half;    // the dealership's lot counts as road
+    if (fabsf(car.across) - car.half < 1.f && car.speed > 4.f) { s_onRoadT = t; s_roadDir = roadTravelDir(); }   // on the road and going: remember the way
     {   const Store* sn = roadStore();                       // ...and so does pulling in to it
         if (sn->active && (sn->x - car.x) * (sn->x - car.x) + (sn->z - car.z) * (sn->z - car.z) < 40.f * 40.f) off = 0.f; }
     bool onRoad = off < 30.f;
@@ -205,7 +208,7 @@ void loop() {
     } else { offT = 0.f; offRoadMsgShown = false; }
     if (car.water > V.fordDepth) {
         stallT += dt;
-        if (stallT > STALL_CLOCK) { placeOnRoad(true); stallT = 0.f; message("TOO DEEP", "THE JEEP AND BIKE CAN WADE", 2.5f); }
+        if (stallT > STALL_CLOCK) { placeOnRoad(true); stallT = 0.f; message("TOO DEEP", nullptr, 2.5f); }
     } else stallT = 0.f;
 
     // ---------------- the journey ----------------
@@ -214,8 +217,14 @@ void loop() {
     journeySetCar(car.x, car.z, car.yaw, moved);
     if (journeyBiomeEvent()) {
         g_prog.visited |= (uint16_t)(1u << journeyCurrent());
-        message(biome(journeyCurrent()).name, nullptr, 3.5f);
-        sfxUi(UI_ARRIVE);
+        if (journeyCurrent() == journeyDestination() || journeyArrivedPending()) {   // where you chose: the arrival
+            message(biome(journeyCurrent()).name, nullptr, 3.5f);
+            sfxUi(UI_ARRIVE);
+        } else {                                               // on the way: where you are, and where you're headed
+            snprintf(subBuf, sizeof subBuf, "%s %.0f MI", biome(journeyDestination()).sign, journeyMilesToDest() + 0.4f);
+            message(biome(journeyCurrent()).name, subBuf, 3.f);
+            sfxUi(UI_TICK);
+        }
         if (progressAllBiomes() && !g_prog.offroadUnlocked) {
             g_prog.offroadUnlocked = true; g_prog.offroadOn = true;
             message("EVERY BIOME SEEN", "OFF-ROAD MODE FOR EVERY VEHICLE", 5.f);
@@ -236,7 +245,7 @@ void loop() {
         float ahead = dx * cosf(car.yaw) + dz * sinf(car.yaw);
         if (ahead > 0.f && ahead < 380.f) {
             juncA = 1.f;
-            bool armLeft = j->armSide < 0;
+            bool armLeft = roadJunctionArmSide() < 0;                 // the sides as you see them at the split
             uint8_t dl = armLeft ? j->destArm : j->destMain, dr = armLeft ? j->destMain : j->destArm;
             float ml = armLeft ? j->milesArm : j->milesMain, mr = armLeft ? j->milesMain : j->milesArm;
             snprintf(juncL, sizeof juncL, "<%s %.0f", biome(dl).sign, ml);

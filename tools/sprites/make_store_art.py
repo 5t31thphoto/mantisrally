@@ -9,7 +9,7 @@ import numpy as np, os
 from PIL import Image
 import make_vehicles as M
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, '..', '..', 'src', 'store_art.h')
+OUT = os.path.join(HERE, 'raw', 'store_art.h')              # packed into src/art_packed.h by pack_art.py
 TM_ROCK, TM_SIGNY, TM_INK = 4, 13, 14
 
 def side(name, box, tw_max=140, th_max=88):

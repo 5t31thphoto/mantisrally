@@ -17,7 +17,7 @@ SHEET = os.path.join(HERE, 'vehicles_sheet.jpg')
 ANGLES = os.path.join(HERE, 'angles_sheet.png')
 # TOP column of the angles sheet (middle row): box, and how it is turned ('r' front right, 'l' front left, 'u' front up)
 TOPS = [((1420, 114, 1519, 179), 'r'), ((1419, 373, 1520, 443), 'l'), ((1414, 639, 1520, 699), 'l'), ((1436, 889, 1502, 956), 'u')]
-OUT = os.path.join(HERE, '..', '..', 'src', 'vehicle_art.h')
+OUT = os.path.join(HERE, 'raw', 'vehicle_art.h')            # packed into src/art_packed.h by pack_art.py
 
 # (side box, rear box) in the sheet, real length / width / height (m)
 VEH = [
@@ -137,7 +137,7 @@ def build(name, side_box, rear_box, L, Wd, Hh, fill):
     P = np.stack([(xs - nx / 2) * vox, (ny - ys) * vox, (zs - nz / 2) * vox], 1)
     return P, col, vox, S, R, Mr
 
-def render(P, col, vox, yaw, pitch, lean, w, h, back=None):
+def render(P, col, vox, yaw, pitch, lean, w, h, back=None, lens=1.0):
     CAM_BACK_ = back if back else CAM_BACK
     # rotate the vehicle: lean about x, pitch about z, yaw about y
     cl, sl = math.cos(lean), math.sin(lean)
@@ -152,7 +152,7 @@ def render(P, col, vox, yaw, pitch, lean, w, h, back=None):
     dx = x4 + CAM_BACK_; dy = y3 - CAM_UP
     d2 = dx * cpc + dy * spc
     u2 = -dx * spc + dy * cpc
-    f = F * SS
+    f = F * SS * lens
     W, H = w * SS, h * SS
     g_d = CAM_BACK_ * cpc - CAM_UP * spc; g_u = -CAM_BACK_ * spc - CAM_UP * cpc   # the ground under the centre
     anchor = (h - 3) * SS
@@ -249,7 +249,10 @@ def main():
         else:
             for pitch in (0, 7, -7):
                 for yaw in (0, 7, 15, 25, 37, 52):
-                    im, al = render(P, col, vox, math.radians(yaw), math.radians(pitch), 0.0, w, h)
+                    # the Jeep is taller than the chase camera: from 6.6 m its nearer tub hides the tyres. Shot from
+                    # farther back with a longer lens it's the same size, with the tyres and clearance of the drawing.
+                    if name == 'JEEP': im, al = render(P, col, vox, math.radians(yaw), math.radians(pitch), 0.0, w, h, 12.0, 12.0 / CAM_BACK)
+                    else: im, al = render(P, col, vox, math.radians(yaw), math.radians(pitch), 0.0, w, h)
                     frames.append(outline(downsample(im, al, pal, w, h), pal))
         # crop every frame to the union box; the anchor (ground under the centre, straight behind) is (w/2, h-3)
         u = np.zeros((h, w), bool)

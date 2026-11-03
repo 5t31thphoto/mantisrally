@@ -45,11 +45,25 @@ static void spawnDeer(const VehicleState& car) {
     if (forest < 0.2f || g_scene.biomeA == B_TUNDRA) return;
     for (Critter& c : s_c) if (!c.on) {
         float fx = cosf(car.yaw), fz = sinf(car.yaw);
-        float d = 60.f + frand() * 70.f;
-        float side = (frand() < 0.5f ? -1.f : 1.f) * (8.f + frand() * 25.f);
-        float x = car.x + fx * d - fz * side, z = car.z + fz * d + fx * side;
-        Ground g; terrainGround(x, z, g);
-        if (g.mat == MAT_WATER || g.mat == MAT_ROCK) return;
+        // far enough ahead to see them grazing before they notice you; some on or right beside the road
+        float x = 0.f, z = 0.f; Ground g; bool ok = false;
+        for (int tries = 0; tries < 5 && !ok; tries++) {
+            float d = 110.f + frand() * 100.f;
+            float side = (frand() < 0.5f ? -1.f : 1.f) * (frand() < 0.33f ? frand() * 9.f : 9.f + frand() * 26.f);
+            x = car.x + fx * d - fz * side; z = car.z + fz * d + fx * side;
+            RoadHit rh;                                                  // along the road ahead, where you'll pass
+            if (roadNearest(car.x, car.z, rh, 120.f) && !rh.arm) {
+                int dir = cosf(car.yaw - rh.yaw) >= 0.f ? 1 : -1;
+                int k = rh.idx + dir * (int)(d / 3.f);
+                if (k > 0 && k < roadCount() - 1) {
+                    const RoadNode& n = roadNode(k);
+                    x = n.x - sinf(n.yaw) * side; z = n.z + cosf(n.yaw) * side;
+                }
+            }
+            terrainGround(x, z, g);
+            ok = g.mat != MAT_WATER && g.mat != MAT_ROCK;           // a bad spot: try another, don't give up
+        }
+        if (!ok) return;
         c.on = true; c.x = x; c.z = z; c.y = g.h; c.kind = 0; c.pose = 3; c.fear = 0.f; c.speed = 0.f;
         c.dodger = frand() < 0.8f;                                  // most leap clear at the last moment
         c.yaw = frand() * 6.283f; c.t = 0.f;
@@ -112,7 +126,11 @@ void fieldUpdate(const VehicleState& car, uint8_t vehicle, float dt) {
         float dx = c.x - car.x, dz = c.z - car.z;
         float d = sqrtf(dx * dx + dz * dz);
         if (d > 260.f) { c.on = false; continue; }
-        if (d < 26.f + car.speed * 0.8f) c.fear = fmaxf(c.fear, 0.7f);
+        // at night a deer caught in the headlights freezes, until the car is nearly on it
+        float hx = c.x - car.x, hz = c.z - car.z, ahd = hx * cosf(car.yaw) + hz * sinf(car.yaw);
+        bool frozen = g_scene.lights > 0.5f && ahd > 7.f && ahd < 80.f && fabsf(-hx * sinf(car.yaw) + hz * cosf(car.yaw)) < 7.f + ahd * 0.35f;   // the beams light the roadside too
+        if (frozen) { c.speed = 0.f; c.fear = 0.f; c.pose = 3; }      // stock still in the light
+        else if (d < 26.f + car.speed * 0.8f) c.fear = fmaxf(c.fear, 0.7f);
         // a car bearing down: a last-moment leap sideways, clear of its path
         float fx = cosf(car.yaw), fz = sinf(car.yaw);
         float ahead = dx * fx + dz * fz, lat = -dx * fz + dz * fx;           // the deer, in the car's frame

@@ -4,9 +4,8 @@
 #include "vehicle.h"
 #include "journey.h"
 #include "display.h"
+#include "art.h"
 #include "ui.h"
-#include "vehicle_art.h"
-#include "store_art.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -104,12 +103,7 @@ static void draw() {
     if (g_prog.offroadUnlocked) {
         rect(b, OFFR.x, OFFR.y, OFFR.w, OFFR.h, g_prog.offroadOn ? rgb565(120, 80, 20) : rgb565(36, 42, 56));
         textC(b, OFFR.x + OFFR.w / 2, OFFR.y + 11, g_prog.offroadOn ? "OFF-ROAD MODE: ON" : "OFF-ROAD MODE: OFF", amber, 1);
-    } else {
-        char t[40]; int n = 0; for (int i = 0; i < B_COUNT; i++) if (g_prog.visited & (1u << i)) n++;
-        snprintf(t, sizeof t, "BIOMES SEEN %d/%d", n, (int)B_COUNT);
-        text(b, 14, 204, t, grey, 1);
-        text(b, 14, 216, "ALL 12: OFF-ROAD MODE", grey, 1);
-    }
+    }                                                   // (nothing about it until it's earned: it's a surprise)
     rect(b, DRIVE.x, DRIVE.y, DRIVE.w, DRIVE.h, rgb565(0, 100, 130));
     textC(b, DRIVE.x + DRIVE.w / 2, DRIVE.y + 8, "DRIVE ON", white, 2);
     if (s_msg[0]) textC(b, 160, 186 - 46, s_msg, lime, 1);

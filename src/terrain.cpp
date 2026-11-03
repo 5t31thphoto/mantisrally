@@ -276,15 +276,31 @@ float roadDistanceTo(float x, float z) {
     return roadNearest(x, z, h, 4000.f) ? fmaxf(0.f, h.dist - h.half) : 1e6f;
 }
 
-bool roadRecover(float& x, float& z, float& yaw, float edge) {
+int roadTravelDir() { return s_carDir; }
+// Which side the branch is on, as you see it choosing: the branch against the road carrying on, 36 m past the split
+int roadJunctionArmSide() {
+    if (!s_junc.active || s_armN < 14) return s_junc.armSide;
+    RoadHit jh;
+    if (!nearestOn(false, s_cnt, s_junc.x, s_junc.z, jh, 60.f)) return s_junc.armSide;
+    int mi = jh.idx + s_junc.dir * 12;
+    if (mi < 0 || mi > s_cnt - 1) return s_junc.armSide;            // the main road isn't built that far yet
+    const RoadNode& m = nodeAt(mi); const RoadNode& a = s_arm[12];
+    float mx = m.x - s_junc.x, mz = m.z - s_junc.z, ax = a.x - s_junc.x, az = a.z - s_junc.z;
+    float cross = mx * az - mz * ax;                                 // + : the branch is to the right of the main road
+    return cross > 0.f ? 1 : -1;
+}
+bool roadRecover(float& x, float& z, float& yaw, float edge, int dirAlong) {
     RoadHit h;
-    if (!roadNearest(x, z, h, 5000.f)) return false;
+    // your route only: the abandoned branch of a fork is never where you're put back
+    bool onMain = nearestOn(false, s_cnt, x, z, h, 1e9f);
+    if (!onMain && !roadNearest(x, z, h, 5000.f)) return false;
     float target = clampf(h.across, -edge, edge);
     float shift = target - h.across;
     x += -sinf(h.yaw) * shift;
     z += cosf(h.yaw) * shift;
     float fwd = h.yaw;
-    if (cosf(yaw - fwd) < 0.f) fwd += PI_F;
+    if (dirAlong != 0) { if (dirAlong < 0) fwd += PI_F; }            // back on course: the way you were travelling
+    else if (cosf(yaw - fwd) < 0.f) fwd += PI_F;                     // free roaming: the way you're facing
     yaw = fwd;
     return true;
 }
@@ -324,6 +340,13 @@ static void spawnJunction(int dir) {
     }
     s_junc.active = true; s_junc.decided = false;
     s_junc.x = J.x; s_junc.z = J.z; s_junc.yaw = hOut; s_junc.dir = dir; s_junc.armSide = side; s_junc.s = J.s;
+    // which side the branch really goes, seen driving out through the split (measured from the road as built:
+    // a fork grown at the back end curves the opposite way to its instruction, which swapped the sign's sides)
+    if (s_armN > 26) {
+        const RoadNode& a = s_arm[25];
+        float lat = (a.x - J.x) * -sinf(hOut) + (a.z - J.z) * cosf(hOut);
+        s_junc.armSide = lat > 0.f ? 1 : -1;
+    }
     s_junc.destMain = journeyDestination();
     s_junc.destArm = journeyPickDestination(s_gA.rng, s_junc.destMain);
     s_junc.milesMain = journeyMilesTo(s_junc.destMain) ;
@@ -419,7 +442,9 @@ static void extend(int dir, bool facing) {
         if (dir == s_storeDir && (n.s - s_storeAtS) * dir >= 0.f && calm) spawnStore(dir);
         return;                                             // (and no fork between a sign and its store)
     }
-    if (!s_junc.active && g.sinceJunc > g.nextJunc && calm) spawnJunction(dir);
+    // a fork is placed only where it will be decided before the next biome transition starts, so every biome after
+    // it is on the route you pick (mid-transition, the next biome was already chosen toward the old destination)
+    if (!s_junc.active && g.sinceJunc > g.nextJunc && calm && journeyMetersToTransition() > 900.f) spawnJunction(dir);
     // the store only goes on the road you are actually on: never while a fork ahead is undecided
     else if (!s_store.active && !s_mmSign.active && calm && g.sinceStore > g.nextStore * (s_storeReq ? 0.35f : 1.f)
              && (!s_junc.active || (s_junc.decided && fabsf(n.s - s_junc.s) > 400.f))) spawnStoreSign(dir);
@@ -566,6 +591,7 @@ static void bakeCell(Grid& g, int ci, int cj) {
         }
     }
     float depth = 0.f;
+    if (road && fabsf(across) < half + 16.f) wl = fminf(wl, rh.y - 0.6f);   // the road stays a causeway above any lake
     if (mat != MAT_ROAD && mat != MAT_SHOULDER && !lot && h < wl) {
         depth = wl - h; mat = MAT_WATER; surf = SURF_MUD;
     }
@@ -765,10 +791,13 @@ void terrainUpdate(float carX, float carZ, float carYaw, float speed, float dt) 
         float dx = carX - s_junc.x, dz = carZ - s_junc.z;
         float past = (dx * cosf(s_junc.yaw) + dz * sinf(s_junc.yaw));
         float dist = sqrtf(dx * dx + dz * dz);
-        if (!s_junc.decided && past > 22.f && dist < 120.f) {
+        if (!s_junc.decided && past > 22.f && dist < 260.f) {
             RoadHit m, a;
             bool hm = nearestOn(false, s_cnt, carX, carZ, m, 1e9f);
             bool ha = s_armN > 1 && nearestOn(true, s_armN, carX, carZ, a, 1e9f);
+            // the two roads overlap just past the split: decide only once one is clearly the one you're on
+            bool clear = !ha || !hm || fabsf(a.dist - m.dist) > 4.f || past > 150.f;
+            if (clear) {
             bool arm = ha && (!hm || a.dist < m.dist);
             if (arm) takeArm();
             s_junc.decided = true;
@@ -783,6 +812,7 @@ void terrainUpdate(float carX, float carZ, float carYaw, float speed, float dt) 
             }
             s_juncEvent = true; s_juncTookArm = arm;
             journeyFollowRoad(arm ? s_junc.destArm : s_junc.destMain);
+            }
         }
         if (dist > 650.f) { s_junc.active = false; s_armN = 0; s_sign.active = false; }
     }
@@ -824,7 +854,9 @@ void terrainGround(float x, float z, Ground& o) {
         int N = g.N;
         int x0 = gridWrap(ix, N), x1 = gridWrap(ix + 1, N), z0 = gridWrap(iz, N) * N, z1 = gridWrap(iz + 1, N) * N;
         const Cell &a = g.c[z0 + x0], &b = g.c[z0 + x1], &c = g.c[z1 + x0], &d = g.c[z1 + x1];
-        float ha = a.h * 0.1f, hb = b.h * 0.1f, hc = c.h * 0.1f, hd = d.h * 0.1f;
+        // the ground under a water cell is its bed: the cell stores the surface (for drawing) and the depth
+        auto ground = [](const Cell& k) { return k.h * 0.1f - ((k.mat & 15) == MAT_WATER ? k.extra * 0.05f : 0.f); };
+        float ha = ground(a), hb = ground(b), hc = ground(c), hd = ground(d);
         float h0 = ha + (hb - ha) * fx, h1 = hc + (hd - hc) * fx;
         o.h = h0 + (h1 - h0) * fz;
         float dhx = ((hb - ha) * (1.f - fz) + (hd - hc) * fz) * g.inv;
@@ -840,7 +872,7 @@ void terrainGround(float x, float z, Ground& o) {
         o.water = o.mat == MAT_WATER ? n.extra * 0.05f : 0.f;
         o.along = 0.f;
         o.cached = true;
-        if (o.mat == MAT_WATER) o.h -= o.water;           // the bed, not the surface
+        // (o.h is already the bed)
         return;
     }
     // outside both caches: compute directly (rare: teleports, tests)

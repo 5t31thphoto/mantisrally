@@ -34,7 +34,7 @@ int main() {
   uint32_t seed = 0x9070u + 2 * 17u;
   universeInit(seed); journeyInit(seed); journeyForce(B_LAKES, B_LAKES, 0.f); terrainInit(seed); sceneInit(seed); fieldInit(seed);
   g_prog.owned = 15; switchVehicle(V_STI); g_prog.current = V_STI; placeOnRoad(false);
-  g_prog.view = VIEW_CHASE; msgT = 0;
+  g_prog.view = VIEW_COCKPIT; msgT = 0;
   setTimeOfDay(0.69f, 0, 0);
   for (int i = 0; i < 30 * 10; i++) {
     RoadHit h; float st = 0;

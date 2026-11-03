@@ -11,8 +11,7 @@
 #include "vehicle.h"
 #include "universe.h"
 #include "mem.h"
-#include "vehicle_art.h"
-#include "cockpit_art.h"
+#include "art.h"
 #include "display.h"
 #include <math.h>
 #include <string.h>
@@ -34,6 +33,39 @@ static constexpr int W = FB_W, H = FB_H;
 static uint8_t fb[W * H];
 static uint8_t* zb = nullptr;
 static uint16_t pal565[256];
+// Fog the palette way (as MantisPlanet): every colour has fogged twins, the nearest palette colours (in its own ramp or
+// the haze ramp) to it mixed toward the fog at four levels. Fog steps a pixel to its twin: no new colours, no dots.
+static uint8_t s_fogLut[4][256];
+static float s_fogRGB[3] = {128.f, 128.f, 128.f};
+static int s_fogLvl = 0;
+static const float FOG_MIX[4] = {0.22f, 0.45f, 0.68f, 0.88f};
+static void buildFogLevel(const uint8_t* rgb, int lv) {
+    float m = FOG_MIX[lv];
+    for (int i = 0; i < 256; i++) {
+        float tr = rgb[i * 3] + (s_fogRGB[0] - rgb[i * 3]) * m, tg = rgb[i * 3 + 1] + (s_fogRGB[1] - rgb[i * 3 + 1]) * m, tb = rgb[i * 3 + 2] + (s_fogRGB[2] - rgb[i * 3 + 2]) * m;
+        int best = i; float bd = 1e30f;
+        for (int pass = 0; pass < 2; pass++) {
+            int base = pass == 0 ? (i & ~15) : P_HAZE;
+            for (int k = 0; k < 16; k++) {
+                int j = base + k;
+                float dr = rgb[j * 3] - tr, dg = rgb[j * 3 + 1] - tg, db = rgb[j * 3 + 2] - tb;
+                float d = dr * dr * 0.3f + dg * dg * 0.59f + db * db * 0.11f;
+                if (d < bd) { bd = d; best = j; }
+            }
+        }
+        s_fogLut[lv][i] = (uint8_t)best;
+    }
+}
+#ifdef HOST
+int renderFogTwinCount(int lv) { int n = 0; for (int i = 0; i < 256; i++) if (s_fogLut[lv][i] != i) n++; return n; }
+#endif
+// a fog amount (0..1) -> a twin: four clean bands with a thin seam on the surface grain (Planet's banding)
+static inline uint8_t fogTwin(uint8_t c, float amt, float grain) {
+    float f = amt * 4.f; int lv = (int)f; float fr = f - lv;
+    if (fr > 0.86f || (fr > 0.62f && grain < 0.5f)) lv++;
+    if (lv <= 0) return c;
+    return s_fogLut[lv > 4 ? 3 : lv - 1][c];
+}
 static uint8_t palRGB[256 * 3];
 static uint8_t s_refl[256];                // a palette entry's reflection (darker, same ramp)
 static uint8_t s_bright[256];              // one step brighter in its ramp (light shafts)
@@ -44,10 +76,24 @@ static uint8_t s_bottom[W];                // rows at and below this are the coc
 static uint8_t s_bottomCock[W];
 static uint8_t* s_cock = nullptr;          // decoded cockpit, 0 = glass
 static uint8_t* s_wheelMask = nullptr;     // cockpit pixels that are the steering wheel
+static uint8_t s_wheelBg = 0;              // the dash behind the wheel (drawn first, so nothing old shows through)
+static float s_wheelK = 1.f;               // the wheel's ellipse (width / height, drawn in perspective)
+static int s_wheelR = 0;                   // how far the wheel's pixels reach from its centre
+static uint8_t s_glassLow[FB_W];           // per column: the lowest row of glass (behind the wheel above it: the world)
 static float s_bob = 0.f;
 
 static MR_FAST uint8_t BAYER[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
-static inline float dith(int x, int y) { return (BAYER[((y & 3) << 2) | (x & 3)] + 0.5f) * (1.f / 16.f); }
+// As MantisPlanet: every dither keyed to world columns (x + pan, the heading in whole pixels), so the same pattern
+// travels with the scenery as you turn instead of sitting on the screen. Pattern and densities are unchanged.
+static int g_pan = 0;
+static inline float dith(int x, int y) { return (BAYER[((y & 3) << 2) | ((x + g_pan) & 3)] + 0.5f) * (1.f / 16.f); }
+// the aurora's pattern: anchored to the sky (view direction), twinkling (half ordered, half a hash that changes over time)
+static inline float sdith(int su, int ry, float t, float twinkle) {
+    float b = (BAYER[((ry & 3) << 2) | (su & 3)] + 0.5f) * (1.f / 16.f);
+    uint32_t h = (uint32_t)su * 73856093u ^ (uint32_t)ry * 19349663u ^ (uint32_t)(t * 6.f) * 83492791u;
+    h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+    return b * (1.f - twinkle) + (h & 1023u) * (1.f / 1024.f) * twinkle;
+}
 static inline float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b : v); }
 static inline int clampi(int v, int a, int b) { return v < a ? a : (v > b ? b : v); }
 static inline uint8_t zcode(float d) { float c = sqrtf(d > 0.f ? d : 0.f) * 11.f; return (uint8_t)((int)(c > 252.f ? 252.f : c) & ~1); }
@@ -239,6 +285,13 @@ static void buildPalette() {
         uint16_t v = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
         pal565[i] = (uint16_t)((v >> 8) | (v << 8));
     }
+    s_fogRGB[0] = clampf(S.fog.r, 0.f, 255.f); s_fogRGB[1] = clampf(S.fog.g, 0.f, 255.f); s_fogRGB[2] = clampf(S.fog.b, 0.f, 255.f);
+    static bool fogMade = false;
+    if (!fogMade) { for (int l = 0; l < 4; l++) buildFogLevel(palRGB, l); fogMade = true; }
+    else {                                                  // the palette drifts slowly: one level every 8 frames
+        static uint8_t tick = 0;
+        if (!(tick++ & 7)) { buildFogLevel(palRGB, s_fogLvl); s_fogLvl = (s_fogLvl + 1) & 3; }
+    }
 }
 
 // ramp tables for reflections and light shafts (static: built once)
@@ -299,6 +352,7 @@ static void setupCamera() {
         hor0 = H * 0.47f + tanf(pitch) * F;
     }
     fx = cosf(cyaw); fz = sinf(cyaw); rx = -fz; rz = fx;
+    g_pan = (int)lroundf(cyaw * F);
     rollT = -tanf(roll);                 // camera rolled right (right side down): the horizon's right end rises
     for (int x = 0; x < W; x++) {
         float kx = (x + 0.5f - W * 0.5f) / F;
@@ -315,6 +369,30 @@ static void setupCamera() {
 struct Smp { float h, a, al, lt; uint8_t mat, surf, half, extra; };
 static uint8_t* s_tex = nullptr;            // 64x64 value noise, 0..255
 static inline int tex(int u, int v) { return s_tex[((v & 63) << 6) | (u & 63)]; }
+// The dither for the ground, water and road: the same world-position texture lookup the ground's own detail uses
+// (so it sits on the surface and moves with it), with the texture's values equalized so every effect keeps the
+// same coverage the old screen pattern gave it.
+static uint8_t s_texRank[256];
+static bool s_rankMade = false;
+static void makeTexRank() {
+    int hist[256] = {0};
+    for (int i = 0; i < 64 * 64; i++) hist[s_tex[i]]++;
+    int acc = 0;
+    for (int v = 0; v < 256; v++) { s_texRank[v] = (uint8_t)((acc + hist[v] / 2) * 255 / (64 * 64)); acc += hist[v]; }
+    s_rankMade = true;
+}
+// The same fine grain as the old screen pattern (uniform, pixel-sized), but each grain belongs to a spot on the
+// surface: a fixed random value per tiny patch of world, sized 1-2 pixels at its distance. Coverage is unchanged.
+static inline float surfDith(float wx, float wz, float z) {
+    int L = 0; for (int zi = (int)z; zi > 1 && L < 12; zi >>= 1) L++;
+    float s = 48.f / (float)(1 << L);
+    uint32_t ix = (uint32_t)(int32_t)floorf(wx * s), iz = (uint32_t)(int32_t)floorf(wz * s);
+    uint32_t h = ix * 0x8DA6B343u ^ iz * 0xD8163841u ^ (uint32_t)L * 0xCB1AB31Fu;
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12; h *= 0x297A2D39u; h ^= h >> 15;
+    return ((h >> 8) & 0xFFFF) * (1.f / 65536.f);
+}
+static uint8_t* s_gpat = nullptr;
+static bool s_mistOn = false;                     // the mist band will read the grain under it this frame                 // per pixel: the surface's dither value (for the reflection pass)
 // distant samples: height bilinear (silhouettes stay smooth), everything else from the nearest cell
 static inline bool sampleLite(const Grid& g, float wx, float wz, Smp& s) {
     float gx = wx * g.inv, gz = wz * g.inv;
@@ -481,19 +559,41 @@ MR_HOT static void drawTerrain(float zFar) {
                     float al = pal + dal * t; if (al < 0.f) al += 12.8f;
                     float lt = plt + (s.lt - plt) * t;
                     float hg = ph + (s.h - ph) * t;
-                    bool useCur = t > dith(x, yy);
+                    // this spot of ground's own grain: only worked out where it matters (an edge between materials,
+                    // fog, a reflection, mist); everywhere else it would change nothing
+                    float sd = -1.f;
+                    bool edge = s.mat != pmat || s.surf != psurf;
+                    if (edge) sd = surfDith(wxx, wzz, zz);
+                    bool useCur = edge ? t > sd : t > 0.5f;
                     uint8_t mat = useCur ? s.mat : pmat, surf = useCur ? s.surf : psurf;
                     float half = (useCur ? s.half : phalf) * 0.05f;
+                    // a wall face rising beside the road is wall, not road: road paint only at the road's own height
+                    float aaPix = fabsf(aa);
+                    if (aaPix < half + 1.3f) {
+                        bool pRoad = pmat == MAT_ROAD || pmat == MAT_SHOULDER, cRoad = s.mat == MAT_ROAD || s.mat == MAT_SHOULDER;
+                        if (pRoad != cRoad) {
+                            float roadH = pRoad ? ph : s.h;
+                            if (hg - roadH > 0.35f) { aa = (aa < 0.f ? -1.f : 1.f) * (half + 9.f); mat = pRoad ? s.mat : pmat; surf = pRoad ? s.surf : psurf; }
+                        }
+                    }
                     bool refl = false;
                     uint8_t c = groundPix(x, yy, wxx, wzz, aa, al, half, lt, zz, hg, mat, surf, useCur ? far : pfar, useCur ? s.extra : pextra, refl);
                     float fg = fogNear + (fogFar - fogNear) * t;
-                    if (fg > 0.8f || (fg > 0.6f && ((x ^ yy) & 1))) {
-                        int hz = clampi((int)(9.f - (yy - hx) * 0.15f + ((c & 15) - 8) * 0.25f), 0, 15);
-                        c = (uint8_t)(P_HAZE + hz); refl = false;
+                    {                                                   // fog: the palette way, stepping to fogged twins
+                        float fa = clampf((fg - 0.3f) * (1.f / 0.42f), 0.f, 1.f);
+                        if (fa > 0.f) {
+                            float f4 = fa * 4.f; int lv = (int)f4; float fr = f4 - lv;
+                            if (fr > 0.86f) lv++;
+                            else if (fr > 0.62f) { if (sd < 0.f) sd = surfDith(wxx, wzz, zz); if (sd < 0.5f) lv++; }   // the grain only in the seam
+                            if (lv > 0) c = s_fogLut[lv > 4 ? 3 : lv - 1][c];
+                            if (fa > 0.5f) refl = false;
+                        }
                     }
                     int i = yy * W + x;
                     fb[i] = c;
                     zb[i] = (uint8_t)(zcode(zz) | (refl ? 1 : 0));
+                    bool mistRow = s_mistOn && yy >= (int)horX[x] - 10 && yy < (int)horX[x] + 18;   // only the mist band's rows
+                    if (s_gpat && (refl || mistRow)) { if (sd < 0.f) sd = surfDith(wxx, wzz, zz); s_gpat[i] = (uint8_t)(sd * 255.f); }
                 }
                 y = yTop;
             }
@@ -788,7 +888,7 @@ static void drawNight() {
                 if (zb[i] != 255) continue;
                 float v = (y - (base - 40.f)) / 40.f;
                 float k = curtain * v * v * (0.5f + streak);
-                if (k < dith(x, y) * 0.9f) continue;
+                if (k < sdith((int)floorf(azC[x] * F), (int)horX[x] - y, s_t, 0.6f) * 0.9f) continue;
                 fb[i] = (uint8_t)(P_SPECIAL + clampi((int)(k * 7.f + (v < 0.5f ? 4.f : 0.f)), 1, 7));
             }
         }
@@ -860,7 +960,10 @@ MR_HOT static void blitTpl(uint8_t id, float sx, float baseY, float pxH, float d
                 case TM_INK:   c = (uint8_t)(P_ROAD + 1); break;
                 default:       c = (uint8_t)(P_SNOW + 7); break;
             }
-            if (fog > 0.72f || (fog > 0.42f && ((x ^ y) & 1))) c = (uint8_t)(P_HAZE + clampi(8 + (sh - 8) / 3, 0, 15));
+            if (fog > 0.3f) {                                   // the palette way: the sprite steps to its fogged twins
+                float sg = (BAYER[((ty & 3) << 2) | (tx & 3)] + 0.5f) * (1.f / 16.f);   // its seam keyed to the sprite itself
+                c = fogTwin(c, clampf((fog - 0.3f) * 2.f, 0.f, 1.f), sg);
+            }
             fb[i] = c; zb[i] = zc;
         }
     }
@@ -1035,8 +1138,9 @@ MR_HOT static void reflectPass() {
             uint8_t src = ym >= 0 ? fb[ym * W + xs] : (uint8_t)P_SKY;
             uint8_t r = s_refl[src];
             float fres = clampf(1.f - (y - horX[x]) / 55.f, 0.25f, 1.f);
-            if (water) fb[i] = (fres > dith(x, y)) ? r : cur;
-            else if (s_wet * 0.55f * fres > dith(x, y)) fb[i] = r;
+            float gp = s_gpat ? s_gpat[i] * (1.f / 255.f) : dith(x, y);   // the reflecting surface's own dither
+            if (water) fb[i] = (fres > gp) ? r : cur;
+            else if (s_wet * 0.55f * fres > gp) fb[i] = r;
         }
     }
 }
@@ -1145,7 +1249,11 @@ static void drawMist() {
         for (int y = hy - 10; y < hy + 18; y++) {
             if (y < 0 || y >= H) continue;
             float k = mist * (1.f - fabsf((float)(y - hy - 3)) / 15.f) * (0.7f + 0.3f * tex((int)((x + cyaw * F) * 0.1f), (int)(y * 0.4f + s_t * 0.3f)) * (1.f / 255.f));
-            if (k > 0.55f || (k > 0.35f && ((x ^ y) & 1))) { int i = y * W + x; if (zb[i] > 60) fb[i] = (uint8_t)(P_HAZE + clampi(10 + (int)(k * 4.f), 0, 15)); }
+            int i = y * W + x;
+            if (zb[i] <= 60) continue;
+            float gp = s_gpat ? s_gpat[i] * (1.f / 255.f) : (((x ^ y) & 1) ? 0.f : 1.f);   // the grain of the land under the mist
+            float ma = clampf((k - 0.12f) * 2.2f, 0.f, 1.f);         // mist: the land under it steps to its fogged twins
+            if (ma > 0.f) fb[i] = fogTwin(fb[i], ma, gp);
         }
     }
 }
@@ -1264,11 +1372,15 @@ MR_HOT static void drawCockpit() {
     if (c.wr > 0) {
         s_wheelAng += (g_view.steer * 1.6f - s_wheelAng) * clampf(g_scene.dt * 12.f, 0.f, 1.f);
         float ca = cosf(s_wheelAng), sa = sinf(s_wheelAng);
-        int R = c.wr + 2;
+        int R = s_wheelR > 0 ? s_wheelR : c.wr + 2;                // the whole reach of the wheel's pixels
+        // the dash behind the wheel first: where the turned wheel isn't, the dash shows, never last frame
+        for (int y = c.wy - R; y <= c.wy + R; y++) for (int x = c.wx - R; x <= c.wx + R; x++)
+            if ((unsigned)x < (unsigned)W && (unsigned)y < (unsigned)H && s_wheelMask[y * W + x] && y > s_glassLow[x]) fb[y * W + x] = s_wheelBg;
         for (int y = c.wy - R; y <= c.wy + R; y++) for (int x = c.wx - R; x <= c.wx + R; x++) {
             if ((unsigned)x >= (unsigned)W || (unsigned)y >= (unsigned)H) continue;
-            float dx = x - c.wx, dy = y - c.wy;
-            int sx = (int)lroundf(c.wx + dx * ca + dy * sa), sy = (int)lroundf(c.wy - dx * sa + dy * ca);
+            // turn it as the round wheel it is (the drawing is an ellipse): stretch to a circle, rotate, squash back
+            float dx = x - c.wx, dy = (y - c.wy) * s_wheelK;
+            int sx = (int)lroundf(c.wx + dx * ca + dy * sa), sy = (int)lroundf(c.wy + (-dx * sa + dy * ca) / s_wheelK);
             if ((unsigned)sx >= (unsigned)W || (unsigned)sy >= (unsigned)H) continue;
             int si = sy * W + sx;
             if (s_wheelMask[si]) fb[y * W + x] = (uint8_t)(P_COCK + s_cock[si]);
@@ -1431,27 +1543,41 @@ void renderSetVehicle(uint8_t veh) {
     if (!s_cock || !s_wheelMask) return;
     for (int i = 0; i < W * H; i++) s_cock[i] = (i & 1) ? (c.px[i >> 1] & 15) : (c.px[i >> 1] >> 4);
     memset(s_wheelMask, 0, W * H);
+    // the glass's lowest row per column: wheel pixels above it have the world behind them, below it the dash
+    for (int x = 0; x < W; x++) {
+        int g = -1;
+        for (int y = 0; y < H; y++) if (!s_cock[y * W + x]) g = y;
+        s_glassLow[x] = (uint8_t)(g < 0 ? 0 : g);
+    }
     if (c.wr > 0) {
-        // the wheel: the dark pixels inside its circle (gauges seen through it stay put)
-        int bg = 0, cnt[16] = {0};
-        for (int y = c.wy - c.wr; y <= c.wy + c.wr; y++) for (int x = c.wx - c.wr; x <= c.wx + c.wr; x++) {
-            if ((unsigned)x >= (unsigned)W || (unsigned)y >= (unsigned)H) continue;
-            int dx = x - c.wx, dy = y - c.wy;
-            if (dx * dx + dy * dy > c.wr * c.wr) continue;
-            uint8_t p = s_cock[y * W + x];
-            if (!p) continue;
-            const uint8_t* rgb = c.pal + (p - 1) * 3;
-            float lum = rgb[0] * 0.3f + rgb[1] * 0.59f + rgb[2] * 0.11f;
-            float sat = (float)(fmaxf(rgb[0], fmaxf(rgb[1], rgb[2])) - fminf(rgb[0], fminf(rgb[1], rgb[2])));
-            int d2 = dx * dx + dy * dy;
-            bool rim = d2 > (c.wr - 4) * (c.wr - 4);
-            if ((lum < 70.f && sat < 60.f) || (rim && lum < 110.f)) s_wheelMask[y * W + x] = 1;
-            else cnt[p]++;
+        // the wheel by its shape: the rim (a ring at its radius), the hub, and the three spokes (left, right, down at
+        // rest, as all the cockpit drawings have them). The dash and gauges seen through it stay where they are.
+        auto lumAt = [&](int x, int y) -> float {
+            uint8_t p = s_cock[y * W + x]; if (!p) return 999.f;
+            const uint8_t* rgb = c.pal + (p - 1) * 3; return rgb[0] * 0.3f + rgb[1] * 0.59f + rgb[2] * 0.11f; };
+        // its ellipse: the rim's left / right ends on the centre row against its top on the centre column
+        int xl = c.wx, xr = c.wx, yt = c.wy;
+        for (int x = c.wx - c.wr - 3; x <= c.wx; x++) if (x >= 0 && lumAt(x, c.wy) < 80.f) { xl = x; break; }
+        for (int x = c.wx + c.wr + 3; x >= c.wx; x--) if (x < W && lumAt(x, c.wy) < 80.f) { xr = x; break; }
+        for (int y = c.wy - c.wr - 3; y <= c.wy; y++) if (y >= 0 && lumAt(c.wx, y) < 80.f) { yt = y; break; }
+        float rx = (xr - xl) * 0.5f, ry = (float)(c.wy - yt);
+        s_wheelK = (rx > 4.f && ry > 4.f) ? clampf(rx / ry, 0.8f, 2.f) : 1.f;
+        float R = rx > 4.f ? rx : (float)c.wr;
+        int cnt[16] = {0};
+        for (int y = c.wy - c.wr - 4; y <= c.wy + c.wr + 4; y++) for (int x = c.wx - c.wr - 4; x <= c.wx + c.wr + 4; x++) {
+            if ((unsigned)x >= (unsigned)W || (unsigned)y >= (unsigned)H || !s_cock[y * W + x]) continue;
+            float dx = (float)(x - c.wx), dy = (y - c.wy) * s_wheelK;
+            float d = sqrtf(dx * dx + dy * dy) / R;
+            bool rim = d > 0.80f && d < 1.12f && lumAt(x, y) < 90.f;     // the rim is the dark ring, not whatever is beside it
+            bool hub = d < 0.30f;
+            bool spoke = d >= 0.30f && d <= 0.85f && ((fabsf(dy) < 2.2f) || (dy > 0.f && fabsf(dx) < 2.2f));
+            if (rim || hub || spoke) s_wheelMask[y * W + x] = 1;
+            else if (d > 1.15f && d < 1.5f && y > s_glassLow[x]) cnt[s_cock[y * W + x]]++;   // the dash around the wheel
         }
+        int bg = 1;
         for (int k = 1; k < 16; k++) if (cnt[k] > cnt[bg]) bg = k;
-        // behind the wheel: the dash's own colour
-        for (int i = 0; i < W * H; i++) if (s_wheelMask[i]) { /* drawn rotated; the base shows dash */ }
-        (void)bg;
+        s_wheelBg = (uint8_t)(P_COCK + bg);
+        s_wheelR = (int)ceilf(R * 1.15f * fmaxf(1.f, s_wheelK)) + 2;
     }
     // the overlay as runs in internal RAM (drawn every cockpit frame: no PSRAM reads)
     if (!s_ckRun) { s_ckRun = (uint16_t*)memSlow(2400 * 2 * sizeof(uint16_t)); s_ckPix = (uint8_t*)memSlow(W * H / 2); }   // read straight through: PSRAM streams it
@@ -1474,12 +1600,15 @@ void renderSetVehicle(uint8_t veh) {
     for (int x = 0; x < W; x++) {
         int y = H;
         while (y > 0 && s_cock[(y - 1) * W + x]) y--;
+        // ...but where the wheel stands in front of the glass, the world is drawn behind it
+        if (y > s_glassLow[x] + 1) y = s_glassLow[x] + 1;
         s_bottomCock[x] = (uint8_t)y;
     }
 }
 
 void renderInit() {
     if (!zb) zb = (uint8_t*)memFast(W * H);
+    if (!s_gpat) s_gpat = (uint8_t*)memSlow(W * H);
     if (!s_tex) {
         s_tex = (uint8_t*)memFast(64 * 64);
         for (int v = 0; v < 64; v++) for (int u = 0; u < 64; u++) {
@@ -1495,6 +1624,8 @@ void renderInit() {
 }
 
 void renderFrame() {
+    s_mistOn = (S.mist * 0.4f + g_scene.mist + g_scene.fog * 0.35f) >= 0.04f;
+    if (!s_rankMade && s_tex) makeTexRank();
     const Scene& sc = g_scene;
     s_t = sc.t;
     if (g_view.vehicle != s_veh) renderSetVehicle(g_view.vehicle);
@@ -1515,7 +1646,7 @@ void renderFrame() {
     const Land& L = journeyLand();
     s_flowers = L.flowers; s_wet = sc.wet; s_paved = L.paved;
     if (g_view.vehicle != s_veh) renderSetVehicle(g_view.vehicle);
-    if (g_view.view != VIEW_COCKPIT) memset(s_bottom, H, sizeof(s_bottom));
+    if (g_view.view != VIEW_COCKPIT || g_view.photo) memset(s_bottom, H, sizeof(s_bottom));   // photo mode: out of the car, the whole picture
     else memcpy(s_bottom, s_bottomCock, sizeof(s_bottom));
     memset(zb, 255, W * H);
     drawTerrain(560.f);

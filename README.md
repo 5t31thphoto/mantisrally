@@ -73,9 +73,11 @@ its rear drawing leaned about the tyre's contact patch.
 
 ## Tools
 
-* `tools/sprites/make_vehicles.py`: chase frames from `vehicles_sheet.jpg` (+ top views from `angles_sheet.png`) -> `src/vehicle_art.h`.
+* `tools/sprites/make_vehicles.py`: chase frames from `vehicles_sheet.jpg` (+ top views from `angles_sheet.png`) -> `tools/sprites/raw/vehicle_art.h`.
   Writes `vehicles_preview.png`. Better side / rear / top drawings in the sheet = better chase sprites, automatically.
-* `tools/sprites/make_cockpits.py`: cockpits from `cockpits_sheet.jpg` -> `src/cockpit_art.h`.
+* `tools/sprites/make_cockpits.py`: cockpits from `cockpits_sheet.jpg` -> `tools/sprites/raw/cockpit_art.h`.
+* `tools/sprites/make_store_art.py`: the store / photo-mode drawings and the MANTIS MOTORS signs -> `tools/sprites/raw/store_art.h`.
+* `tools/sprites/pack_art.py`: packs all of `tools/sprites/raw/` into `src/art_packed.h` (deflate; unpacked into PSRAM at boot by `src/art.cpp`, byte for byte). Run it after any of the three above.
 * `tools/host/gameplay_test.cpp`: the CI world test (40 miles of road, forks, biomes, dealership, recovery, free roam).
 * `tools/host/drive_sim.cpp`: the whole game on the desktop (real setup()/loop(), a tilt autopilot through the IMU path),
   with frame timings. `drive_sim [minutes] [vehicle 0-3] [view 0-2]`.

@@ -21,6 +21,7 @@ struct Grain {
     float fc0 = 1000, fc1 = 1000, q = 1, sweep = 0;      // sweep: 0..1 per block progress
     int sweepN = 1;
     uint8_t mode = 0;                                     // 0 BP, 1 LP
+    bool near = false;                                    // your car / camera: stays close and dry, not placed in the world
     dsp::SVF f;
 };
 struct Ping {
@@ -29,11 +30,15 @@ struct Ping {
     uint32_t ph = 0;
     float dph = 0, mul = 1, env = 0, dec = 0, amp = 0, rev = 0.15f;
 };
-static Grain s_gr[40];
+static Grain s_gr[96];
 static Ping s_pg[16];
 
 static inline float decFor(float tauSec) { return expf(-1.f / (tauSec * dsp::SR)); }
 
+// sounds made by the car or camera (impacts, the shutter, wipers) are mixed close, not placed out in the world
+static bool s_nearShots = false;
+static float s_near[BLOCK];
+float* natureNearBuffer() { return s_near; }
 static void grain(float delaySec, uint8_t mode, float fc0, float fc1, float q, float attSec, float tauSec, float amp, float rev = 0.12f) {
     for (Grain& g : s_gr) {
         if (g.on) continue;
@@ -45,7 +50,7 @@ static void grain(float delaySec, uint8_t mode, float fc0, float fc1, float q, f
         g.dec = decFor(tauSec);
         g.amp = amp;
         g.rev = rev;
-        g.mode = mode;
+        g.mode = mode; g.near = s_nearShots;
         g.fc0 = fc0; g.fc1 = fc1; g.q = q;
         g.sweepN = (int)((attSec + tauSec * 2.5f) * dsp::SR / BLOCK) + 1;
         g.sweep = 0.f;
@@ -85,7 +90,7 @@ static void shotsBlock(Bus& b, int n) {
             float l, bp;
             g.f.tick(rng.bi(), l, bp);
             float v = (g.mode ? l : bp) * e;
-            b.dry[i] += v;
+            if (g.near) s_near[i] += v; else b.dry[i] += v;
             b.rev[i] += v * g.rev;
         }
         g.delay = 0;
@@ -109,48 +114,93 @@ static void shotsBlock(Bus& b, int n) {
 
 // ================= bumps, critters =================
 // ---- impacts (the rally) ----
+// A car hitting something is ONE heavy, fused event, not a rattle of separate clicks (that read as a cartoon skeleton):
+// a deep body thud, a low metallic clank (a few low-mid body resonances ringing briefly), and a crunch made of a few
+// OVERLAPPING low-mid noise bursts that fuse together. Debris is a couple of soft low knocks, not ticks.
+static void bodyHit(float t0, float a) {
+    grain(t0, 1, 340.f, 150.f, 0.9f, 0.003f, 0.12f, 0.95f * a, 0.15f);                // the mass of the car (where the speaker can play it)
+    grain(t0, 0, 210.f, 170.f, 1.5f, 0.003f, 0.10f, 0.35f * a, 0.15f);
+    const float CL[4] = {185.f, 330.f, 520.f, 770.f};                                  // the body's low resonances
+    for (int i = 0; i < 4; i++) grain(t0 + i * 0.002f, 0, CL[i] * (0.94f + rng.uni() * 0.12f), CL[i] * 0.92f, 4.f, 0.001f, 0.09f + 0.05f * rng.uni(), (0.16f - i * 0.025f) * a, 0.18f);
+    for (int i = 0; i < 5; i++)                                                         // the crunch: overlapping, fused
+        grain(t0 + i * (0.004f + rng.uni() * 0.006f), 0, 400.f + rng.uni() * 900.f, 340.f + rng.uni() * 300.f, 1.f, 0.004f, 0.06f + rng.uni() * 0.05f, (0.2f - i * 0.025f) * a, 0.15f);
+}
+// A real collision (measured from three recordings): not one hit but a SEQUENCE -- things keep folding, bouncing and
+// striking for up to half a second, hits ~50-60 ms apart, each a little weaker; the onset builds over 15-50 ms; shared
+// body resonances near 550 Hz and 1.4-1.6 kHz ring out over hundreds of milliseconds; a crunching tail under it all.
+static void collision(float t0, float sev) {
+    int hits = 3 + (int)((sev - 1.f) * 4.f); if (hits > 9) hits = 9;
+    float t = t0;
+    for (int h = 0; h < hits; h++) {
+        float k = powf(0.82f, (float)h) * (h == 0 ? 0.7f : 1.f);                       // builds, then fades
+        grain(t, 1, 380.f, 160.f, 0.9f, 0.006f, 0.09f, 0.9f * k, 0.15f);
+        grain(t, 0, 240.f, 210.f, 1.5f, 0.006f, 0.08f, 0.35f * k, 0.15f);          // the weight, low
+        for (int i = 0; i < 3; i++)
+            grain(t + i * 0.005f, 0, 300.f + rng.uni() * 1500.f, 260.f + rng.uni() * 500.f, 1.f, 0.005f, 0.05f + rng.uni() * 0.05f, 0.12f * k, 0.15f);
+        grain(t, 0, 2600.f + rng.uni() * 1800.f, 2400.f, 1.2f, 0.002f, 0.025f, 0.06f * k, 0.12f);
+        t += 0.045f + rng.uni() * 0.02f;
+    }
+    float ring = 0.25f + (sev - 1.f) * 0.12f; if (ring > 0.4f) ring = 0.4f;               // the body rings out
+    grain(t0 + 0.01f, 0, 560.f, 540.f, 3.f, 0.02f, ring, 0.06f / sev, 0.2f);
+    grain(t0 + 0.01f, 0, 1450.f, 1400.f, 3.f, 0.02f, ring * 0.7f, 0.07f, 0.2f);
+    grain(t0 + 0.03f, 1, 900.f, 350.f, 0.8f, 0.03f, ring * 0.9f, 0.2f, 0.2f);             // the crunching tail
+}
+static void debris(float t0, float a) {
+    for (int i = 0; i < 2; i++) grain(t0 + i * (0.15f + rng.uni() * 0.12f), 0, 380.f + rng.uni() * 300.f, 320.f, 2.f, 0.002f, 0.035f, 0.07f * a, 0.2f);
+}
 void natureImpact(uint8_t kind, float st) {
+    float sev = st;                                       // the raw severity: past 1 it's a collision (30+ mph)
     float a = clampf(st, 0.15f, 1.f);
+    s_nearShots = true;
     switch (kind) {
-        case IMP_TREE:                                        // a hollow wooden knock, the trunk shudders, leaves rain down
-            grain(0.f, 1, 420.f, 160.f, 2.f, 0.002f, 0.09f, 0.42f * a, 0.25f);
-            ping(0.f, 210.f, 0.82f, 0.08f, 0.14f, 0.28f * a, 0.3f);
-            ping(0.004f, 345.f, 0.9f, 0.05f, 0.09f, 0.14f * a, 0.3f);
-            grain(0.03f, 0, 2600.f, 1900.f, 0.8f, 0.03f, 0.18f, 0.10f * a, 0.35f);
-            for (int i = 0; i < 4; i++) grain(0.2f + i * (0.09f + rng.uni() * 0.1f), 0, 2300.f + rng.uni() * 900.f, 1800.f, 0.9f, 0.015f, 0.05f, (0.05f - i * 0.008f) * a, 0.35f);
-            break;
-        case IMP_ROCK:                                        // a hard crack, then steel scraping on stone
-            grain(0.f, 0, 3800.f, 2400.f, 1.4f, 0.f, 0.012f, 0.5f * a, 0.15f);
-            grain(0.f, 1, 700.f, 250.f, 1.5f, 0.002f, 0.07f, 0.32f * a, 0.2f);
-            ping(0.f, 1650.f, 0.97f, 0.1f, 0.12f, 0.08f * a, 0.25f);
-            grain(0.02f, 0, 2700.f, 2100.f, 3.f, 0.03f, 0.22f, 0.14f * a, 0.2f);
-            break;
-        case IMP_DEER:                                        // a comedic thud... and a wet splat... and a drip or two
-            grain(0.f, 1, 520.f, 140.f, 1.2f, 0.003f, 0.08f, 0.5f, 0.2f);
-            ping(0.f, 150.f, 0.55f, 0.09f, 0.1f, 0.36f, 0.2f);
-            grain(0.06f, 1, 2600.f, 260.f, 1.4f, 0.006f, 0.16f, 0.32f, 0.3f);
-            grain(0.09f, 0, 1300.f, 500.f, 2.5f, 0.01f, 0.09f, 0.16f, 0.3f);
-            ping(0.38f, 1150.f, 1.25f, 0.05f, 0.05f, 0.05f, 0.4f);
-            ping(0.61f, 980.f, 1.3f, 0.05f, 0.05f, 0.035f, 0.4f);
-            break;
-        case IMP_CRUNCH: {                                    // landing too fast: panels fold, the floor slams, bits rattle off
-            grain(0.f, 1, 380.f, 90.f, 1.2f, 0.002f, 0.14f, 0.55f * a, 0.2f);
-            int n = 6 + (int)(a * 10.f);
-            float t = 0.f;
-            for (int i = 0; i < n; i++) {
-                t += 0.008f + rng.uni() * 0.03f * (1.f + i * 0.15f);
-                grain(t, 0, 1200.f + rng.uni() * 2200.f, 900.f + rng.uni() * 900.f, 2.f + rng.uni() * 3.f, 0.f, 0.012f + rng.uni() * 0.02f, (0.32f - i * 0.015f) * a, 0.18f);
-            }
-            ping(0.01f, 720.f, 0.94f, 0.2f, 0.22f, 0.07f * a, 0.3f);
-            for (int i = 0; i < 4; i++) grain(0.25f + i * (0.06f + rng.uni() * 0.08f), 0, 3000.f + rng.uni() * 1500.f, 2500.f, 2.f, 0.f, 0.01f, 0.08f * a * (1.f - i * 0.2f), 0.25f);
+        // Impacts built from what they are: noise ringing through real resonances (a body, a trunk, a panel, a stone),
+        // never pitched tones. grain(delay, mode 0 band-pass / 1 low-pass, fc start, fc end, q, attack, decay, amp, reverb)
+        case IMP_TREE: {                                      // the car into a trunk: the body hit, a dull wood knock,
+            bodyHit(0.f, a);                                                            // bark cracking, the canopy shaking
+            if (sev > 1.15f) collision(0.004f, sev);
+            grain(0.f, 0, 210.f, 190.f, 3.f, 0.001f, 0.05f, 0.18f * a, 0.15f);
+            grain(0.004f, 0, 1600.f, 1300.f, 1.2f, 0.f, 0.012f, 0.10f * a, 0.1f);
+            grain(0.08f, 0, 2600.f, 2200.f, 0.7f, 0.12f, 0.45f, 0.035f * a, 0.4f);        // leaves: one soft rustle, not ticks
+            debris(0.25f, a);
             break;
         }
-        case IMP_SHUTTER:                                     // ka-chunk: the mirror flips up, the shutter, the mirror back
-            grain(0.f, 0, 4200.f, 3000.f, 1.6f, 0.f, 0.006f, 0.30f, 0.05f);
-            grain(0.004f, 0, 1100.f, 800.f, 2.5f, 0.f, 0.022f, 0.20f, 0.05f);
-            grain(0.075f, 0, 3600.f, 2800.f, 1.6f, 0.f, 0.006f, 0.24f, 0.05f);
-            grain(0.079f, 0, 900.f, 700.f, 2.5f, 0.f, 0.03f, 0.16f, 0.05f);
+        case IMP_ROCK: {                                      // the car on stone: the body hit, a short hard crack, a scrape
+            bodyHit(0.f, a);
+            if (sev > 1.15f) collision(0.004f, sev);
+            grain(0.f, 0, 1700.f, 1500.f, 1.5f, 0.f, 0.01f, 0.12f * a, 0.1f);
+            grain(0.04f, 0, 1500.f, 1100.f, 1.2f, 0.03f, 0.2f, 0.06f * a, 0.12f);        // steel dragged over rock (low, not a whine)
+            debris(0.3f, a);
             break;
+        }
+        case IMP_DEER:                                        // a soft, heavy body: a muffled thud, a low wet splat
+            grain(0.f, 1, 170.f, 65.f, 0.8f, 0.004f, 0.12f, 0.6f, 0.18f);
+            grain(0.f, 0, 300.f, 240.f, 2.f, 0.003f, 0.06f, 0.18f, 0.18f);
+            grain(0.035f, 1, 1300.f, 260.f, 1.f, 0.004f, 0.10f, 0.22f, 0.25f);
+            grain(0.05f, 0, 560.f, 320.f, 2.f, 0.006f, 0.05f, 0.10f, 0.25f);
+            break;
+        case IMP_CRUNCH: {                                    // landing too hard: the chassis slams, the bump stops clunk,
+            bodyHit(0.f, a * 0.9f);                                                     // the body crunches, glass if it's hard
+            if (sev > 1.15f) collision(0.006f, sev);
+            grain(0.004f, 0, 260.f, 240.f, 2.f, 0.001f, 0.05f, 0.2f * a, 0.15f);
+            if (a > 0.7f) for (int i = 0; i < 3; i++)
+                grain(0.03f + rng.uni() * 0.1f, 0, 3800.f + rng.uni() * 2000.f, 3600.f, 4.f, 0.f, 0.03f, 0.04f, 0.2f);
+            debris(0.3f, a);
+            break;
+        }
+        case IMP_SHUTTER: {                                   // a film SLR: the mirror slaps up, curtains (1/60 s), the mirror
+            grain(0.f, 1, 650.f, 220.f, 0.8f, 0.001f, 0.02f, 0.42f, 0.05f);          // drops, then the thumb winds the film on:
+            grain(0.f, 0, 1150.f, 1000.f, 2.f, 0.f, 0.012f, 0.25f, 0.05f);           // a ratchet of small clicks and the stop
+            grain(0.003f, 0, 5200.f, 4600.f, 1.6f, 0.f, 0.0025f, 0.4f, 0.03f);
+            grain(0.020f, 0, 6000.f, 5300.f, 1.6f, 0.f, 0.0025f, 0.45f, 0.03f);
+            grain(0.068f, 1, 420.f, 180.f, 0.8f, 0.001f, 0.014f, 0.24f, 0.05f);
+            grain(0.068f, 0, 1300.f, 1100.f, 2.f, 0.f, 0.008f, 0.14f, 0.05f);
+            for (int i = 0; i < 13; i++)                                               // the wind lever's ratchet
+                grain(0.30f + i * 0.024f + rng.uni() * 0.004f, 0, 2900.f + rng.uni() * 700.f, 2600.f, 3.f, 0.f, 0.0018f, 0.11f + (i & 1) * 0.03f, 0.03f);
+            grain(0.30f, 0, 1500.f, 2300.f, 1.2f, 0.06f, 0.12f, 0.035f, 0.03f);      // the spring under it
+            grain(0.635f, 0, 2400.f, 2200.f, 2.f, 0.f, 0.004f, 0.22f, 0.04f);        // the lever clicks home
+            grain(0.635f, 1, 500.f, 250.f, 0.8f, 0.001f, 0.01f, 0.1f, 0.04f);
+            break;
+        }
         case IMP_WIPE:                                        // the wiper: a soft rubber swish across the glass
             grain(0.f, 0, 1500.f, 900.f, 0.9f, 0.18f, 0.16f, 0.035f, 0.1f);
             break;
@@ -159,6 +209,7 @@ void natureImpact(uint8_t kind, float st) {
             ping(0.62f, 1850.f, 0.88f, 0.12f, 0.07f, 0.018f, 0.1f);
             break;
     }
+    s_nearShots = false;
 }
 
 void natureBump(uint8_t kind) {

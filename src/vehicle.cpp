@@ -24,34 +24,34 @@ static const VehicleSpec VEHICLES[V_COUNT] = {
       0.78f, 2.1f, 0.62f, 0.50f, 0.17f,
       3.0f, 0.35f, 1.18f, 0.0f, COCKPIT_RALLY,
       V_STI, 0.f, 0.80f, 0.85f, 0.35f },
-    { "OLD JEEP 4.0", "JEEP", "1993 4.0 SIX. PART-TIME 4X4.", "LEAVE THE ROAD, LOW RANGE, WADE", false,
+    { "OLD JEEP 4.0", "JEEP", "1993 4.0 SIX. PART-TIME 4X4.", "SOME ROADS AREN'T ON ANY MAP.", false,
       1520.f, 2.37f, 0.54f, 0.78f, 1.48f, 1.10f,
       34.f, 17.f, 1.8f, 0.30f,
       ENG_I6, 310.f, 2800.f, 700.f, 5000.f, 2000.f, 0.f,
-      5, {3.83f, 2.33f, 1.44f, 1.00f, 0.79f, 0.f}, 4.10f, 0.39f, 0.22f,
+      5, {3.83f, 2.45f, 1.56f, 1.00f, 0.79f, 0.f}, 4.10f, 0.39f, 0.22f,
       DRIVE_4WD, 0.50f, 0.85f, 0.65f, false,
       {0.84f, 0.88f, 0.90f, 0.84f, 0.70f, 0.82f, 0.82f, 0.95f}, 1.40f, 1.18f, 0.16f, 0.45f,
       1.20f, 1.25f, 0.24f, 0.62f, 0.30f,
       45.f, 0.85f, 1.62f, 0.0f, COCKPIT_JEEP,
       V_STI, 20.f, 0.45f, 0.60f, 0.85f },
-    { "STINGRAY BAJA", "VETTE", "LIFTED V8 ON ALL-TERRAINS. RWD.", "SHORTCUTS, DONUTS, 200 MPH", false,
+    { "STINGRAY BAJA", "VETTE", "LIFTED V8 ON ALL-TERRAINS. RWD.", "WHY TAKE THE LONG WAY ROUND?", false,
       1450.f, 2.49f, 0.50f, 0.66f, 1.58f, 1.0f,
       32.f, 30.f, 3.9f, 0.30f,
-      ENG_V8, 640.f, 4400.f, 750.f, 6400.f, 3000.f, 0.f,
+      ENG_V8, 900.f, 4400.f, 750.f, 6600.f, 3000.f, 0.f,
       5, {2.64f, 1.75f, 1.34f, 1.00f, 0.78f, 0.f}, 3.55f, 0.40f, 0.14f,
       DRIVE_RWD, 0.0f, 1.15f, 0.60f, true,
-      {1.08f, 0.80f, 0.78f, 0.62f, 0.48f, 0.66f, 0.68f, 0.76f}, 1.50f, 1.15f, 0.13f, 0.80f,
-      0.86f, 1.75f, 0.45f, 0.60f, 0.24f,
+      {1.55f, 1.32f, 1.32f, 1.12f, 0.88f, 1.25f, 1.18f, 1.25f}, 1.50f, 1.20f, 0.17f, 0.50f,   // grip to match 900 Nm: insane traction
+      0.86f, 1.40f, 0.55f, 0.60f, 0.40f,
       18.f, 0.45f, 1.38f, 0.0f, COCKPIT_VETTE,
       V_JEEP, 40.f, 1.0f, 0.95f, 0.60f },
-    { "CR250 DIRT BIKE", "BIKE", "TWO-STROKE 250. KNOBBIES.", "GO ANYWHERE. NO ROADS. NO CLOCK.", true,
-      190.f, 1.48f, 0.47f, 0.95f, 0.20f, 0.8f,
-      28.f, 22.f, 4.5f, 0.35f,
-      ENG_2STROKE, 42.f, 8000.f, 1600.f, 10000.f, 5000.f, 0.f,
+    { "CR250 DIRT BIKE", "BIKE", "TWO-STROKE 250. KNOBBIES.", "WHAT IF THE ROAD WAS OPTIONAL?", true,
+      190.f, 1.48f, 0.47f, 0.95f, 0.20f, 0.7f,
+      32.f, 22.f, 6.0f, 0.25f,
+      ENG_2STROKE, 48.f, 8000.f, 1600.f, 10000.f, 5000.f, 0.f,
       5, {2.20f, 1.68f, 1.36f, 1.13f, 0.96f, 0.f}, 11.8f, 0.33f, 0.06f,
       DRIVE_RWD, 0.0f, 1.05f, 0.65f, true,
       {0.92f, 0.95f, 1.00f, 0.86f, 0.70f, 0.88f, 0.94f, 0.92f}, 1.45f, 1.20f, 0.15f, 0.45f,
-      0.55f, 1.35f, 0.42f, 0.55f, 0.32f,
+      0.55f, 1.20f, 0.50f, 0.55f, 0.40f,
       999.f, 0.60f, 1.52f, 0.25f, COCKPIT_BIKE,
       V_VETTE, 60.f, 0.85f, 0.80f, 1.0f },
 };
@@ -120,6 +120,10 @@ static void substep(VehicleState& s, const VehicleSpec& V, uint8_t id, const Veh
     s.water = gc.mat == MAT_WATER ? gc.water : 0.f;
     float gVy = (gY - s.lastGY) / dt;
     if (fabsf(gVy) > 40.f) gVy = 0.f;               // cache scroll / teleport, not a real ramp
+    // a face can't throw you upward faster than you're moving across it: ramps up to 45 degrees are untouched;
+    // a stretched near-vertical cell launches you like a ramp, not like a slingshot (that created energy)
+    {   float across = sqrtf(s.u * s.u + s.v * s.v) + 2.f;
+        if (gVy > across) gVy = across; }
     s.lastGY = gY;
 
     // ---- suspension: one spring under the CG ----

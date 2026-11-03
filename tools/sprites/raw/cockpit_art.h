@@ -818,7 +818,7 @@ static const uint8_t CK_BIKE_PX[9600] = {
 struct CockArt { const uint8_t* pal; const uint8_t* px; int8_t wx, wy, wr; };
 static const CockArt COCK_ART[4] = {
   {CK_RALLY_PAL, CK_RALLY_PX, 43, 105, 18},
-  {CK_JEEP_PAL, CK_JEEP_PX, 47, 106, 24},
+  {CK_JEEP_PAL, CK_JEEP_PX, 47, 105, 27},
   {CK_VETTE_PAL, CK_VETTE_PX, 45, 94, 21},
   {CK_BIKE_PAL, CK_BIKE_PX, 0, 0, 0},
 };

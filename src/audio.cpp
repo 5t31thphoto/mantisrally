@@ -93,7 +93,20 @@ void audioRender(int16_t* out, int n) {
     drain();
     memset(&s_bus, 0, sizeof(s_bus));
     natureScene(n);
-    natureBlock(s_bus, n, s_nat);
+    // the world outside: rendered on its own, then put out there -- softened with distance, muffled more by the
+    // cabin when you're inside, and given more air (reverb) -- instead of playing dry in your head
+    static Bus s_nb; static dsp::SVF s_natLP;
+    memset(&s_nb, 0, sizeof(s_nb));
+    float* nearB = natureNearBuffer(); memset(nearB, 0, sizeof(float) * BLOCK);
+    natureBlock(s_nb, n, s_nat);
+    s_natLP.set(g_car.cockpit ? 2400.f : 4200.f, 0.6f);
+    float inCab = g_car.cockpit ? 0.8f : 1.f;
+    for (int i = 0; i < n; i++) {
+        float d = s_natLP.lp(s_nb.dry[i]) * inCab;
+        s_bus.dry[i] += d * 0.8f + nearB[i];               // the car's own impacts and the shutter: right here
+        s_bus.rev[i] += s_nb.rev[i] + d * 0.35f;
+        s_bus.dly[i] += s_nb.dly[i];
+    }
     engineBlock(s_bus, n);
     const Scene& sc = g_scene;
     s_dly.target = AUDIO_SR * 0.21f;

@@ -22,6 +22,7 @@ void natureBump(uint8_t kind);
 void natureThunder(float delaySec, float power, float close);
 void natureCritter(uint8_t kind, float dist);
 void natureImpact(uint8_t kind, float strength);
+float* natureNearBuffer();                 // this block's close sounds (impacts, shutter): mixed dry
 
 void engineInit();
 void engineBlock(Bus& b, int n);
