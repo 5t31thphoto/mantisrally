@@ -67,7 +67,7 @@ struct VehicleState {
     float wheelRot;            // for the store sprite / dash
 };
 
-void vehicleReset(VehicleState& s, uint8_t id, float x, float z, float yaw);
+void vehicleReset(VehicleState& s, uint8_t id, float x, float z, float yaw, float refY = 1e9f);   // refY: the height you're at (decks)
 void vehicleStep(VehicleState& s, uint8_t id, const VehicleInput& in, float dt);
 // Collision response against a round obstacle (tree, rock) at (ox, oz) radius rad. Returns impact speed.
 float vehicleHitPost(VehicleState& s, uint8_t id, float ox, float oz, float rad);

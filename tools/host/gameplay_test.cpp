@@ -56,7 +56,7 @@ int main() {
     terrainUpdate(x, z, yaw, v, dt);
     journeyUpdate(moved, yaw, true);
     journeySetCar(x, z, yaw, moved);
-    float y = terrainHeight(x, z);
+    float y = first ? terrainHeight(x, z) : terrainHeightRef(x, z, lastY);   // what the wheels drive on (decks too)
     CHECK(std::isfinite(y), "height NaN at %.1f mi", dist / MILE);
     if (!first) { float g = fabsf(y - lastY) / fmaxf(moved, 0.1f); if (g > maxGrade && fabsf(r.across) < r.half) maxGrade = g;
       if (g > 0.6f && fabsf(r.across) < r.half) {           // count places, not passes (the test driver can loop)

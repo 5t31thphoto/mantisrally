@@ -18,7 +18,12 @@ struct RoadNode {
     float x, z, y, yaw, s;               // position, road height, heading, arc length
     uint8_t surf, half20, flags, side;   // surface, half-width (1/20 m), flags, store side
 };
-enum : uint8_t { RN_CREST = 1, RN_JUNCTION = 2, RN_STORE = 4, RN_SIGN = 8 };
+enum : uint8_t { RN_CREST = 1, RN_JUNCTION = 2, RN_STORE = 4, RN_SIGN = 8,
+                 RN_BRIDGE = 16,       // a trestle deck: the road rides on timber here, the land under it is left alone
+                 RN_XING = 32,         // the newer road through a level crossing: the older road's surface wins inside its width
+                 RN_CAUTION = 64 };    // a yellow caution triangle stands beside this node (side: RN_SIDE_*)
+// RoadNode::side: bits 0-1 the dealership's side (1 right, 2 left); bits 2-3 the caution sign's side (front frame)
+enum : uint8_t { RN_SIDE_CAUTION_R = 4, RN_SIDE_CAUTION_L = 8 };
 
 struct Junction {
     bool active;
@@ -70,17 +75,24 @@ struct Ground {
 };
 void terrainGround(float x, float z, Ground& g);
 float terrainHeight(float x, float z);
+// The same, aware of trestle decks: refY is the height you are at now (your wheels' last ground). Near a deck, on it if
+// you are up at its level, under it if you are down at the road or land below. Without a deck: terrainGround exactly.
+void terrainGroundRef(float x, float z, float refY, Ground& g);
+float terrainHeightRef(float x, float z, float refY);
 
 // --- road ---
 int  roadCount();
 const RoadNode& roadNode(int i);             // 0 = back end .. count-1 = front end
 int  roadArmCount();
 const RoadNode& roadArmNode(int i);
-struct RoadHit { float across, along, y, yaw, half, dist; uint8_t surf; bool arm; int idx; };
-bool roadNearest(float x, float z, RoadHit& h, float maxDist = 1e9f);
+struct RoadHit { float across, along, y, yaw, half, dist; uint8_t surf; bool arm; int idx; uint8_t flags; };   // flags: shared by both ends of the segment
+// skipFlags: segments whose two ends both carry one of these flags are ignored (the land under a deck: RN_BRIDGE)
+bool roadNearest(float x, float z, RoadHit& h, float maxDist = 1e9f, uint8_t skipFlags = 0);
 // Put a point back on the nearest road (edge or centre), facing along it nearest to `yaw`.
-bool roadRecover(float& x, float& z, float& yaw, float edge, int dirAlong = 0);   // dirAlong: +1/-1 along the road, 0 = by heading
+bool roadRecover(float& x, float& z, float& yaw, float edge, int dirAlong = 0, float* roadY = nullptr);   // dirAlong: +1/-1 along the road, 0 = by heading; roadY: that road's height
 int  roadTravelDir();
+int  roadCarIndex();                 // the road node the car is at (index into roadNode)
+bool roadArmMarked();                // the arm carries a deck or a caution sign (worth scanning when drawing)
 int  roadJunctionArmSide();          // the branch's side as you see it at the split (+1 right, -1 left)                 // which way along the road the car is heading (+1 / -1)
 const Junction* roadJunction();
 const RoadSign* roadSign();

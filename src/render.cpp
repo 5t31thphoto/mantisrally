@@ -18,7 +18,10 @@
 #include <stdio.h>
 #if !defined(HOST) && !defined(MR_NO_IRAM)
 #include <esp_attr.h>
-#define MR_HOT IRAM_ATTR        // inner loops in instruction RAM (no flash-cache stalls), as MantisPlanet does
+// inner loops in instruction RAM (no flash-cache stalls), as MantisPlanet does. noinline: a static function called
+// once is otherwise inlined into its caller and follows the caller's section (ESP-IDF: "when a function is inlined, it
+// will follow its caller's segment, and the attribute will not take effect") -- drawTerrain was landing in flash.
+#define MR_HOT IRAM_ATTR __attribute__((noinline))
 #define MR_FAST DRAM_ATTR
 #else
 #define MR_HOT
@@ -103,6 +106,8 @@ static inline int band(float f, int x, int y) {              // Planet's pixel-a
     if (fr > 0.62f && ((x ^ y) & 1)) return i + 1;
     return i;
 }
+static inline int ifloor(float v) { int i = (int)v; return v < (float)i ? i - 1 : i; }
+static inline int iceil(float v) { int i = (int)v; return v > (float)i ? i + 1 : i; }
 static inline float fastAtan2(float y, float x) {
     float ax = fabsf(x), ay = fabsf(y);
     float a = fminf(ax, ay) / (fmaxf(ax, ay) + 1e-9f);
@@ -384,76 +389,76 @@ static void makeTexRank() {
 // The same fine grain as the old screen pattern (uniform, pixel-sized), but each grain belongs to a spot on the
 // surface: a fixed random value per tiny patch of world, sized 1-2 pixels at its distance. Coverage is unchanged.
 static inline float surfDith(float wx, float wz, float z) {
-    int L = 0; for (int zi = (int)z; zi > 1 && L < 12; zi >>= 1) L++;
-    float s = 48.f / (float)(1 << L);
-    uint32_t ix = (uint32_t)(int32_t)floorf(wx * s), iz = (uint32_t)(int32_t)floorf(wz * s);
+    int zi = (int)z;
+    int L = zi > 1 ? 31 - __builtin_clz((unsigned)zi) : 0;          // halvings of the distance until 1 (as the old loop)
+    if (L > 12) L = 12;
+    uint32_t pb = (uint32_t)(127 - L) << 23; float inv2; memcpy(&inv2, &pb, 4);   // 2^-L exactly
+    float s = 48.f * inv2;                                           // = 48 / 2^L, bit for bit
+    uint32_t ix = (uint32_t)(int32_t)ifloor(wx * s), iz = (uint32_t)(int32_t)ifloor(wz * s);
     uint32_t h = ix * 0x8DA6B343u ^ iz * 0xD8163841u ^ (uint32_t)L * 0xCB1AB31Fu;
     h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12; h *= 0x297A2D39u; h ^= h >> 15;
     return ((h >> 8) & 0xFFFF) * (1.f / 65536.f);
 }
 static uint8_t* s_gpat = nullptr;
 static bool s_mistOn = false;                     // the mist band will read the grain under it this frame                 // per pixel: the surface's dither value (for the reflection pass)
-// distant samples: height bilinear (silhouettes stay smooth), everything else from the nearest cell
-static inline bool sampleLite(const Grid& g, float wx, float wz, Smp& s) {
+// A ray sample, in two halves: its height (every sample needs it), and the rest (only for samples that draw: about a
+// third of them are behind nearer land). Same cells, same weights, same arithmetic as the old sampleAt / sampleLite:
+// near samples (lite = false) blend road distance and light; distant ones (lite = true) take them from the nearest cell.
+struct Probe { const Cell *a, *b, *c, *d; float tx, tz, h; bool lite; };
+static inline __attribute__((always_inline)) bool probeAt(const Grid& g, int wrap, float wx, float wz, bool lite, Probe& p) {
     float gx = wx * g.inv, gz = wz * g.inv;
-    int ix = (int)(gx + 4096.f) - 4096, iz = (int)(gz + 4096.f) - 4096;
+    int ix, iz;
+    if (lite) { ix = (int)(gx + 4096.f) - 4096; iz = (int)(gz + 4096.f) - 4096; }
+    else { ix = ifloor(gx); iz = ifloor(gz); }
     if (ix < g.ox + 1 || iz < g.oz + 1 || ix + 2 >= g.ox + g.N || iz + 2 >= g.oz + g.N) return false;
-    float tx = gx - ix, tz = gz - iz;
-    int N = g.N;
-    int x0 = ix - g.ox; x0 = (x0 + (g.ox % N + N)) % N;
-    int z0 = iz - g.oz; z0 = (z0 + (g.oz % N + N)) % N;
+    p.tx = gx - ix; p.tz = gz - iz; p.lite = lite;
+    const int N = g.N;
+    int x0 = ix - g.ox + (wrap & 0xFFFF); if (x0 >= N) x0 -= N;        // = ix mod N (the window's origin, wrapped once a frame)
+    int z0 = iz - g.oz + (wrap >> 16); if (z0 >= N) z0 -= N;
     int x1 = x0 + 1 == N ? 0 : x0 + 1, z1 = z0 + 1 == N ? 0 : z0 + 1;
-    const Cell &a = g.c[z0 * N + x0], &b = g.c[z0 * N + x1], &c = g.c[z1 * N + x0], &d = g.c[z1 * N + x1];
-    float h0 = a.h + (b.h - a.h) * tx, h1 = c.h + (d.h - c.h) * tx;
-    s.h = (h0 + (h1 - h0) * tz) * 0.1f;
-    const Cell& n = tx < 0.5f ? (tz < 0.5f ? a : c) : (tz < 0.5f ? b : d);
-    s.a = n.across * 0.02f; s.lt = s_light[n.nrm]; s.al = n.along * 0.05f;
-    s.mat = n.mat & 15; s.surf = n.mat >> 4; s.extra = n.extra;
-    s.half = (s.mat == MAT_ROAD || s.mat == MAT_SHOULDER) ? n.extra : 68;
+    p.a = &g.c[z0 * N + x0]; p.b = &g.c[z0 * N + x1]; p.c = &g.c[z1 * N + x0]; p.d = &g.c[z1 * N + x1];
+    float h0 = p.a->h + (p.b->h - p.a->h) * p.tx, h1 = p.c->h + (p.d->h - p.c->h) * p.tx;
+    p.h = (h0 + (h1 - h0) * p.tz) * 0.1f;
     return true;
 }
-static inline bool sampleAt(const Grid& g, float wx, float wz, Smp& s) {
-    float gx = wx * g.inv, gz = wz * g.inv;
-    int ix = (int)floorf(gx), iz = (int)floorf(gz);
-    if (ix < g.ox + 1 || iz < g.oz + 1 || ix + 2 >= g.ox + g.N || iz + 2 >= g.oz + g.N) return false;
-    float tx = gx - ix, tz = gz - iz;
-    int N = g.N;
-    int x0 = ix % N; if (x0 < 0) x0 += N;
-    int z0 = iz % N; if (z0 < 0) z0 += N;
-    int x1 = x0 + 1 == N ? 0 : x0 + 1, z1 = z0 + 1 == N ? 0 : z0 + 1;
-    const Cell &a = g.c[z0 * N + x0], &b = g.c[z0 * N + x1], &c = g.c[z1 * N + x0], &d = g.c[z1 * N + x1];
-    float h0 = a.h + (b.h - a.h) * tx, h1 = c.h + (d.h - c.h) * tx;
-    s.h = (h0 + (h1 - h0) * tz) * 0.1f;
-    float a0 = a.across + (b.across - a.across) * tx, a1 = c.across + (d.across - c.across) * tx;
-    s.a = (a0 + (a1 - a0) * tz) * 0.02f;
-    const Cell& n = tx < 0.5f ? (tz < 0.5f ? a : c) : (tz < 0.5f ? b : d);
-    float l0 = s_light[a.nrm] + (s_light[b.nrm] - s_light[a.nrm]) * tx, l1 = s_light[c.nrm] + (s_light[d.nrm] - s_light[c.nrm]) * tx;
-    s.lt = l0 + (l1 - l0) * tz;
+static inline __attribute__((always_inline)) const Cell& probeNearest(const Probe& p) { return p.tx < 0.5f ? (p.tz < 0.5f ? *p.a : *p.c) : (p.tz < 0.5f ? *p.b : *p.d); }
+static inline __attribute__((always_inline)) void probeAttr(const Probe& p, Smp& s) {
+    const Cell &a = *p.a, &b = *p.b, &c = *p.c, &d = *p.d;
+    const Cell& n = probeNearest(p);
+    const float tx = p.tx, tz = p.tz;
+    s.h = p.h;
+    if (p.lite) { s.a = n.across * 0.02f; s.lt = s_light[n.nrm]; }
+    else {
+        float a0 = a.across + (b.across - a.across) * tx, a1 = c.across + (d.across - c.across) * tx;
+        s.a = (a0 + (a1 - a0) * tz) * 0.02f;
+        float l0 = s_light[a.nrm] + (s_light[b.nrm] - s_light[a.nrm]) * tx, l1 = s_light[c.nrm] + (s_light[d.nrm] - s_light[c.nrm]) * tx;
+        s.lt = l0 + (l1 - l0) * tz;
+    }
     s.al = n.along * 0.05f;
     s.mat = n.mat & 15; s.surf = n.mat >> 4; s.extra = n.extra;
     s.half = (s.mat == MAT_ROAD || s.mat == MAT_SHOULDER) ? n.extra : 68;
-    return true;
 }
+static float s_lwNear = 0.f;                // z * 0.55 below this: the paint is at its minimum width (no divide needed)
 
 static float s_flowers = 0.f, s_wet = 0.f, s_paved = 1.f;
 
 // one ground pixel. Returns the palette index; sets *refl for water / wet surfaces.
 static inline uint8_t groundPix(int x, int y, float wx, float wz, float a, float al, float half, float lt, float z, float hgt,
                                 uint8_t mat, uint8_t surf, bool farSmp, uint8_t extra, bool& refl) {
-    float bay = dith(x, y);
     int scl = z < 12.f ? 5 : (z < 35.f ? 2 : 1);
     int n = tex((int)(wx * scl), (int)(wz * scl));
     float nf = n * (1.f / 255.f);
     float s = lt * 12.f + (nf - 0.5f) * 3.f;
-    if (s_lights > 0.02f && z < 75.f) s += s_lights * beamC[x] * 10.f * fminf(1.f, 11.f / (z + 3.f)) * (0.35f + 0.65f * s_night);
+    if (s_lights > 0.02f && z < 75.f) s += s_lights * beamC[x] * 10.f * (z + 3.f <= 11.f ? 1.f : fminf(1.f, 11.f / (z + 3.f))) * (0.35f + 0.65f * s_night);
     float aa = fabsf(a);
-    float lw = fmaxf(0.10f, z * 0.55f / F);           // paint never thinner than ~half a pixel
     uint8_t c;
     if (aa < half && mat != MAT_WATER) {
         if (surf == SURF_TARMAC) {
+            const float lz = z * 0.55f;
+            const float lw = lz < s_lwNear ? 0.10f : fmaxf(0.10f, lz / F);   // paint never thinner than ~half a pixel
             int lv = clampi(band(s * 0.9f + 1.f, x, y), 0, 15);
             c = (uint8_t)(P_ROAD + lv);
-            if (tex((int)(wx * 9.f), (int)(wz * 9.f)) > 228 && z < 25.f) c = (uint8_t)(P_ROAD + clampi(lv + 2, 0, 15));
+            if (z < 25.f && tex((int)(wx * 9.f), (int)(wz * 9.f)) > 228) c = (uint8_t)(P_ROAD + clampi(lv + 2, 0, 15));
             float e = fabsf(aa - (half - 0.32f));
             float m = al;
             float sl = s * 0.25f + 0.2f;
@@ -462,7 +467,7 @@ static inline uint8_t groundPix(int x, int y, float wx, float wz, float a, float
             if (s_wet > 0.25f) refl = true;
         } else if (surf == SURF_SNOW) {
             float rut = fabsf(aa - half * 0.48f);
-            int lv = (int)(s * 0.5f + 1.5f - (rut < 0.45f ? 2.f : 0.f) + bay);
+            int lv = (int)(s * 0.5f + 1.5f - (rut < 0.45f ? 2.f : 0.f) + dith(x, y));
             c = (uint8_t)(P_SNOW + clampi(lv, 0, 7));
         } else {
             float rut = fabsf(aa - half * 0.48f);
@@ -494,7 +499,7 @@ static inline uint8_t groundPix(int x, int y, float wx, float wz, float a, float
                 c = (uint8_t)(P_ROCK + clampi(band(s + strata + 0.5f, x, y), 0, 15));
                 break;
             }
-            case MAT_SNOW: c = (uint8_t)(P_SNOW + clampi((int)(s * 0.55f + 1.f + bay), 0, 7)); break;
+            case MAT_SNOW: c = (uint8_t)(P_SNOW + clampi((int)(s * 0.55f + 1.f + dith(x, y)), 0, 7)); break;
             case MAT_SAND: c = (uint8_t)(P_SOIL + clampi(band(s + 2.f + sinf(wx * 0.9f + wz * 0.5f) * 0.9f, x, y), 0, 15)); break;
             case MAT_SOIL: c = (uint8_t)(P_SOIL + clampi(band(s, x, y), 0, 15)); break;
             case MAT_MUD:
@@ -523,33 +528,62 @@ MR_HOT static void drawTerrain(float zFar) {
     const Grid& gN = terrainNear();
     const Grid& gF = terrainFar();
     float maxH = fmaxf(gN.maxH, gF.maxH);
+    const int wrapN = gridWrap(gN.ox, gN.N) | (gridWrap(gN.oz, gN.N) << 16);   // the windows' origins, wrapped (once)
+    const int wrapF = gridWrap(gF.ox, gF.N) | (gridWrap(gF.oz, gF.N) << 16);
+    const float topK = (maxH - cy) * F;                  // the stop test, multiplied out (no divide per sample)
+    s_lwNear = 0.0999f * F;
+    Smp s = Smp(), q = Smp();
+    Probe pr = Probe(), pp = Probe();
     for (int x = 0; x < W; x++) {
         int y = s_bottom[x];
         const float ddx = dxC[x], ddz = dzC[x], hx = horX[x];
+        const int mist0 = (int)hx - 10, mist1 = (int)hx + 18;   // the mist band's rows
         float z = 0.55f;
         // previous sample (for per-pixel interpolation)
         float pY = (float)H + 40.f, pz = z, pwx = cx + ddx * z, pwz = cz + ddz * z, pa = 600.f, pal = 0.f, plt = 0.5f, ph = cy - 2.f;
         uint8_t pmat = 0, psurf = 0, phalf = 68, pextra = 0; bool pfar = false;
         bool first = true, inFar = false;
+        bool pHave = false;              // the previous sample's road distance, light and material are worked out
+        bool pYok = true;                // ... and its screen row (a hidden one's is worked out only if needed)
+        uint8_t zcC = 0; float zLo = 1e30f, zHi = -1.f;   // the depth code: worked out again only where it can change
         while (z < zFar && y > 0) {
             float wx = cx + ddx * z, wz = cz + ddz * z;
-            Smp s; bool far = inFar;
+            bool far = inFar;
             if (!inFar) {
-                bool ok = z < 45.f ? sampleAt(gN, wx, wz, s) : sampleLite(gN, wx, wz, s);
-                if (!ok) { inFar = far = true; }
+                if (!probeAt(gN, wrapN, wx, wz, !(z < 45.f), pr)) { inFar = far = true; }
             }
             if (far) {
-                if (!sampleLite(gF, wx, wz, s)) break;
-                if (s.extra && s.mat < MAT_WATER) s.h += s.extra * (0.35f + 0.65f * tex((int)(wx * 0.6f), (int)(wz * 0.6f)) * (1.f / 255.f));
+                if (!probeAt(gF, wrapF, wx, wz, true, pr)) break;
+                const Cell& n = probeNearest(pr);
+                if (n.extra && (n.mat & 15) < MAT_WATER) pr.h += n.extra * (0.35f + 0.65f * tex((int)(wx * 0.6f), (int)(wz * 0.6f)) * (1.f / 255.f));
             }
-            float ys = hx - (s.h - cy) * F / z;
-            if (first) { pY = fmaxf(ys, (float)H + 1.f); first = false; pa = s.a; pal = s.al; plt = s.lt; ph = s.h; pmat = s.mat; psurf = s.surf; phalf = s.half; pextra = s.extra; pfar = far; }
-            if (ys < y) {
-                int yTop = (int)ceilf(ys);
+            const float A = (pr.h - cy) * F;
+            float ys = 0.f;
+            bool vis;
+            if (first) {
+                ys = hx - A / z;
+                pY = fmaxf(ys, (float)H + 1.f); first = false; pp = pr; pHave = false; pYok = true; ph = pr.h; pfar = far;
+                vis = ys < y;
+            } else {
+                // hidden behind what's drawn, for certain (margin far above rounding): no divide, no row
+                const float B = (hx - (float)y) * z;
+                if (B - A > 0.02f * z + (fabsf(A) + fabsf(B)) * 1e-6f) vis = false;
+                else { ys = hx - A / z; vis = ys < y; }
+            }
+            if (vis) {
+                if (!pYok) { pY = hx - (ph - cy) * F / pz; pYok = true; }      // exactly the row it would have had
+                for (int k = pHave ? 1 : 0; k < 2; k++) probeAttr(k ? pr : pp, k ? s : q);
+                if (!pHave) { pa = q.a; pal = q.al; plt = q.lt; pmat = q.mat; psurf = q.surf; phalf = q.half; pextra = q.extra; }
+                int yTop = iceil(ys);
                 if (yTop < 0) yTop = 0;
                 float span = pY - ys;
                 float inv = span > 0.001f ? 1.f / span : 0.f;
                 float fogNear = s_fog[clampi((int)pz, 0, 519)], fogFar = s_fog[clampi((int)z, 0, 519)];
+                const bool pRoad = pmat == MAT_ROAD || pmat == MAT_SHOULDER, cRoad = s.mat == MAT_ROAD || s.mat == MAT_SHOULDER;
+                // two roads side by side at different heights (the narrow shelf): the face between them is a cut wall
+                const float legDh = s.h - ph;
+                const bool legWall = pRoad && cRoad && fabsf(legDh) > 1.5f + 0.15f * (z - pz);
+                const float legLow = legDh > 0.f ? ph : s.h;
                 for (int yy = y - 1; yy >= yTop; yy--) {
                     float t = clampf((pY - yy) * inv, 0.f, 1.f);
                     float zz = pz + (z - pz) * t;
@@ -567,13 +601,16 @@ MR_HOT static void drawTerrain(float zFar) {
                     bool useCur = edge ? t > sd : t > 0.5f;
                     uint8_t mat = useCur ? s.mat : pmat, surf = useCur ? s.surf : psurf;
                     float half = (useCur ? s.half : phalf) * 0.05f;
-                    // a wall face rising beside the road is wall, not road: road paint only at the road's own height
-                    float aaPix = fabsf(aa);
-                    if (aaPix < half + 1.3f) {
-                        bool pRoad = pmat == MAT_ROAD || pmat == MAT_SHOULDER, cRoad = s.mat == MAT_ROAD || s.mat == MAT_SHOULDER;
-                        if (pRoad != cRoad) {
-                            float roadH = pRoad ? ph : s.h;
-                            if (hg - roadH > 0.35f) { aa = (aa < 0.f ? -1.f : 1.f) * (half + 9.f); mat = pRoad ? s.mat : pmat; surf = pRoad ? s.surf : psurf; }
+                    if (legWall) {
+                        if (hg - legLow > 0.35f) { aa = half + 9.f; mat = MAT_ROCK; surf = SURF_ROCK; }
+                    } else {
+                        // a wall face rising beside the road is wall, not road: road paint only at the road's own height
+                        float aaPix = fabsf(aa);
+                        if (aaPix < half + 1.3f) {
+                            if (pRoad != cRoad) {
+                                float roadH = pRoad ? ph : s.h;
+                                if (hg - roadH > 0.35f) { aa = (aa < 0.f ? -1.f : 1.f) * (half + 9.f); mat = pRoad ? s.mat : pmat; surf = pRoad ? s.surf : psurf; }
+                            }
                         }
                     }
                     bool refl = false;
@@ -591,15 +628,24 @@ MR_HOT static void drawTerrain(float zFar) {
                     }
                     int i = yy * W + x;
                     fb[i] = c;
-                    zb[i] = (uint8_t)(zcode(zz) | (refl ? 1 : 0));
-                    bool mistRow = s_mistOn && yy >= (int)horX[x] - 10 && yy < (int)horX[x] + 18;   // only the mist band's rows
+                    if (!(zz >= zLo && zz < zHi)) {             // exactly zcode(zz): up a column depth only grows, and the
+                        zcC = zcode(zz); zLo = zz;              // code only steps at known depths ((c + 2) / 11)^2
+                        float kk = (zcC + 2) * (1.f / 11.f);
+                        zHi = zcC >= 252 ? 1e30f : kk * kk * 0.999f;
+                    }
+                    zb[i] = (uint8_t)(zcC | (refl ? 1 : 0));
+                    bool mistRow = s_mistOn && yy >= mist0 && yy < mist1;   // only the mist band's rows
                     if (s_gpat && (refl || mistRow)) { if (sd < 0.f) sd = surfDith(wxx, wzz, zz); s_gpat[i] = (uint8_t)(sd * 255.f); }
                 }
                 y = yTop;
+                pY = ys; pYok = true;
+                pa = s.a; pal = s.al; plt = s.lt; pmat = s.mat; psurf = s.surf; phalf = s.half; pextra = s.extra; pHave = true;
+            } else {
+                pYok = false; pHave = false;            // its row and the rest only if the next sample draws
             }
-            pY = ys; pz = z; pwx = wx; pwz = wz; pa = s.a; pal = s.al; plt = s.lt; ph = s.h; pmat = s.mat; psurf = s.surf; phalf = s.half; pextra = s.extra; pfar = far;
-            // nothing beyond can rise above what is drawn: done
-            if (y <= hx - (maxH - cy) * F / z) break;
+            pz = z; pwx = wx; pwz = wz; ph = pr.h; pfar = far; pp = pr;
+            // nothing beyond can rise above what is drawn: done (y <= hx - topK / z, multiplied out)
+            if ((hx - (float)y) * z >= topK) break;
             z += far ? 0.6f + z * 0.045f : 0.12f + z * 0.038f;
         }
         ymin[x] = (uint8_t)clampi(y, 0, H);
@@ -619,7 +665,7 @@ static float* s_panNear = nullptr;
 static int s_panCur = 0;
 static bool s_panFull = true;
 static float s_panPeaks = -1.f; static bool s_panMesa = false; static float s_panMorph = 0.f;
-static void panoramaRefresh(int count) {
+__attribute__((noinline)) static void panoramaRefresh(int count) {   // once a frame: flash (not inlined into IRAM)
     const Scene& sc = g_scene;
     const Biome& A = biome(sc.biomeA); const Biome& B = biome(sc.biomeB);
     float peaks = A.peaks + (B.peaks - A.peaks) * sc.blend;
@@ -638,7 +684,7 @@ static void panoramaRefresh(int count) {
         s_panNear[k] = (f2 - 0.42f) * (10.f + peaks * 26.f);
     }
 }
-static void computePanorama() {
+__attribute__((noinline)) static void computePanorama() {            // once a frame: flash (not inlined into IRAM)
     if (!s_panFar) { s_panFar = (float*)memSlow(PAN_N * sizeof(float)); s_panNear = (float*)memSlow(PAN_N * sizeof(float)); s_panFull = true; }   // read ~160x a frame: PSRAM is fine
     {   const Scene& sc = g_scene;
         const Biome& A = biome(sc.biomeA); const Biome& B = biome(sc.biomeB);
@@ -740,8 +786,8 @@ MR_HOT static void drawSkyAndPanorama() {
         for (int y = 0; y < top[x]; y++) {
             int k = clampi((int)(y + 0.5f - (skyH - 78.f)), 0, 78);
             float base = s_skyPow[k], tt = s_skyTT[k];
-            float dx = x - s_sunX, dy = y - s_sunY;
-            float halo = s_sunVis * 5.5f / (1.f + (dx * dx + dy * dy) * (1.f / 260.f));
+            float halo = 0.f;
+            if (s_sunVis > 0.f) { float dx = x - s_sunX, dy = y - s_sunY; halo = s_sunVis * 5.5f / (1.f + (dx * dx + dy * dy) * (1.f / 260.f)); }
             fb[y * W + x] = (uint8_t)(P_SKY + clampi(band(base + hglow * tt * 6.5f + halo, x, y), 0, 15));
             zb[y * W + x] = 255;
         }
@@ -749,9 +795,15 @@ MR_HOT static void drawSkyAndPanorama() {
     // rainbow: a 42 degree circle round the point opposite the sun
     if (sc.rainbow > 0.05f && sc.night < 0.5f) {
         float antiAz = sc.sunAz + 3.14159f, antiEl = -sc.sunElev;
+        // the band is 0.69..0.75 rad from the antisolar point: rows outside +-0.76 rad of its elevation can't be in it
+        const float elLo = antiEl - 0.76f, elHi = antiEl + 0.76f;
+        const float tHi = elHi < 1.55f ? tanf(elHi) : 1e6f, tLo = elLo > -1.55f ? tanf(elLo) : -1e6f;
         for (int x = 0; x < W; x++) {
             float da = wrapPi(azC[x] - antiAz);
-            for (int y = 0; y < ymin[x] && y < H; y++) {
+            if (fabsf(da) > 0.76f) continue;
+            int yA = (int)(horX[x] - tHi * F) - 2, yB = (int)(horX[x] - tLo * F) + 3;   // el <= elHi .. el >= elLo, with room
+            if (yA < 0) yA = 0;
+            for (int y = yA; y < ymin[x] && y < H && y < yB; y++) {
                 if (zb[y * W + x] < 254) continue;
                 float el = atanf((horX[x] - y) / F);
                 float r = sqrtf(da * da + (el - antiEl) * (el - antiEl));
@@ -767,7 +819,7 @@ static constexpr int CL_N = 512, CL_R = 26;
 static uint8_t* s_cl = nullptr;                // cloud density around the horizon [angle][row]
 static int s_clCur = 0;
 static bool s_clFull = true;
-static void cloudRefresh(int count) {
+__attribute__((noinline)) static void cloudRefresh(int count) {      // once a frame: flash (not inlined into IRAM)
     const Scene& sc = g_scene;
     for (int n = 0; n < count; n++) {
         int k = s_clCur; s_clCur = (s_clCur + 1) % CL_N;
@@ -929,6 +981,16 @@ MR_HOT static void blitTpl(uint8_t id, float sx, float baseY, float pxH, float d
     float fog = s_fog[clampi((int)depth, 0, 519)];
     float inv = 1.f / sc;
     int lightAdd = (int)(headK * 6.f) - (s_night > 0.5f ? 3 : 0);
+    // fogTwin(c, amt, grain) with amt fixed for the whole sprite: two possible levels, the seam picks by grain < 0.5,
+    // which for the 4x4 pattern is BAYER <= 7. The same twins, worked out once instead of per pixel.
+    const uint8_t* fogA = nullptr; const uint8_t* fogB = nullptr; int fogMode = 0;   // 0 none, 1 always B, 2 B in the seam
+    if (fog > 0.3f) {
+        float f = clampf((fog - 0.3f) * 2.f, 0.f, 1.f) * 4.f; int lv = (int)f; float fr = f - lv;
+        int lB = lv + 1;
+        fogA = lv <= 0 ? nullptr : s_fogLut[lv > 4 ? 3 : lv - 1];
+        fogB = lB <= 0 ? nullptr : s_fogLut[lB > 4 ? 3 : lB - 1];
+        fogMode = fr > 0.86f ? 1 : (fr > 0.62f ? 2 : 3);
+    }
     for (int x = x0 > 0 ? x0 : 0; x < x1 && x < W; x++) {
         int tx = (int)((x - x0) * inv);
         if (tx >= t.w) tx = t.w - 1;
@@ -938,10 +1000,10 @@ MR_HOT static void blitTpl(uint8_t id, float sx, float baseY, float pxH, float d
         for (int y = y0 > 0 ? y0 : 0; y < (int)by && y < H; y++) {
             int ty = (int)((y - y0) * inv);
             if (ty >= t.h) ty = t.h - 1;
+            int i = y * W + x;
+            if (zb[i] <= zc) continue;                       // hidden: don't fetch the sprite's pixel at all
             uint8_t v = t.px[ty * t.w + tx];
             if (!v) continue;
-            int i = y * W + x;
-            if (zb[i] <= zc) continue;
             int m = v >> 4, sh = (v & 15) + lightAdd;
             uint8_t c;
             switch (m) {
@@ -960,9 +1022,9 @@ MR_HOT static void blitTpl(uint8_t id, float sx, float baseY, float pxH, float d
                 case TM_INK:   c = (uint8_t)(P_ROAD + 1); break;
                 default:       c = (uint8_t)(P_SNOW + 7); break;
             }
-            if (fog > 0.3f) {                                   // the palette way: the sprite steps to its fogged twins
-                float sg = (BAYER[((ty & 3) << 2) | (tx & 3)] + 0.5f) * (1.f / 16.f);   // its seam keyed to the sprite itself
-                c = fogTwin(c, clampf((fog - 0.3f) * 2.f, 0.f, 1.f), sg);
+            if (fogMode) {                                      // the palette way: the sprite steps to its fogged twins
+                const uint8_t* L = fogMode == 1 ? fogB : (fogMode == 2 && BAYER[((ty & 3) << 2) | (tx & 3)] <= 7 ? fogB : fogA);
+                if (L) c = L[c];                                // (its seam keyed to the sprite itself)
             }
             fb[i] = c; zb[i] = zc;
         }
@@ -1075,6 +1137,224 @@ static void drawSignAndStore() {
     }
 }
 
+// ================================================================================== trestles and caution signs
+// Drawn from the road's own nodes, where the road engine built a deck (RN_BRIDGE) or a level crossing (RN_CAUTION).
+// Flash code: it only does anything with a trestle or a sign in view.
+static inline float rsqrtF(float v) {                 // 1/sqrt(v): two Newton steps (decks: depth codes and planks)
+    uint32_t i; memcpy(&i, &v, 4); i = 0x5f3759dfu - (i >> 1);
+    float r; memcpy(&r, &i, 4);
+    r = r * (1.5f - 0.5f * v * r * r);
+    return r * (1.5f - 0.5f * v * r * r);
+}
+struct CV { float lat, up, dep, u; };                // a point in camera space, and a texture coordinate
+struct SV { float x, y, w, uw; };                    // on screen: 1/depth and u/depth interpolate linearly
+static constexpr float NEAR_D = 0.4f;
+static inline CV camPt(float wx, float wy, float wz, float u) {
+    float dx = wx - cx, dz = wz - cz;
+    CV v; v.lat = dx * rx + dz * rz; v.up = wy - cy; v.dep = dx * fx + dz * fz; v.u = u;
+    return v;
+}
+static inline CV lerpCV(const CV& a, const CV& b, float t) {
+    CV v; v.lat = a.lat + (b.lat - a.lat) * t; v.up = a.up + (b.up - a.up) * t; v.dep = a.dep + (b.dep - a.dep) * t; v.u = a.u + (b.u - a.u) * t;
+    return v;
+}
+static inline SV projCV(const CV& v) {
+    float iw = 1.f / v.dep;
+    SV o; o.x = W * 0.5f + v.lat * iw * F; o.y = hor0 + (o.x - W * 0.5f) * rollT - v.up * iw * F; o.w = iw; o.uw = v.u * iw;
+    return o;
+}
+static inline uint8_t zcodeW(float w, float& dep) {   // the depth code from 1/depth (as zcode)
+    float r = rsqrtF(w); dep = r * r;
+    float c = r * 11.f;
+    return (uint8_t)((int)(c > 252.f ? 252.f : c) & ~1);
+}
+static inline uint8_t fogged(uint8_t c, float dep, int x, int y) {   // the palette way, as the sprites
+    float f = s_fog[clampi((int)dep, 0, 519)];
+    return f > 0.3f ? fogTwin(c, clampf((f - 0.3f) * 2.f, 0.f, 1.f), dith(x, y)) : c;
+}
+// kind 0: deck planks (shade + stripes along u), 1: plain timber. The deck wins a tie with the ground it sits on (at the
+// abutments the road's own cells are at the deck's height): two depth codes nearer.
+static void fillTri(const SV& a, const SV& b, const SV& c, int kind, int shade) {
+    float area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    if (fabsf(area) < 1e-3f) return;
+    int x0 = clampi(ifloor(fminf(a.x, fminf(b.x, c.x))), 0, W - 1), x1 = clampi(iceil(fmaxf(a.x, fmaxf(b.x, c.x))), 0, W - 1);
+    int y0 = clampi(ifloor(fminf(a.y, fminf(b.y, c.y))), 0, H - 1), y1 = clampi(iceil(fmaxf(a.y, fmaxf(b.y, c.y))), 0, H - 1);
+    if (x0 > x1 || y0 > y1) return;
+    const float ia = 1.f / area;
+    const float dA = -(c.y - b.y) * ia, dB = -(a.y - c.y) * ia, dC = -(b.y - a.y) * ia;   // weights' step per pixel in x
+    for (int y = y0; y <= y1; y++) {
+        float py = y + 0.5f, px = x0 + 0.5f;
+        float lA = ((c.x - b.x) * (py - b.y) - (c.y - b.y) * (px - b.x)) * ia;
+        float lB = ((a.x - c.x) * (py - c.y) - (a.y - c.y) * (px - c.x)) * ia;
+        float lC = ((b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x)) * ia;
+        for (int x = x0; x <= x1; x++, lA += dA, lB += dB, lC += dC) {
+            if (lA < 0.f || lB < 0.f || lC < 0.f || y >= s_bottom[x]) continue;
+            float w = lA * a.w + lB * b.w + lC * c.w;
+            if (w <= 0.f) continue;
+            float dep; uint8_t zc = zcodeW(w, dep);
+            zc = zc > 2 ? (uint8_t)(zc - 2) : 0;
+            int i = y * W + x;
+            if (zb[i] <= zc) continue;
+            int lv = shade;
+            if (kind == 0) {
+                float pu = (lA * a.uw + lB * b.uw + lC * c.uw) * dep * 3.125f;   // planks 0.32 m wide, across the road
+                int pi = ifloor(pu); float frc = pu - pi;
+                lv += (pi & 1) ? 0 : 1;
+                if (frc < 0.14f) lv -= 2;                                          // the gap between two planks
+            }
+            fb[i] = fogged((uint8_t)(P_BARK + clampi(lv, 0, 7)), dep, x, y);
+            zb[i] = zc;
+        }
+    }
+}
+// a convex polygon (camera space), cut at the near plane, as a fan
+static void fillPoly(const CV* v, int n, int kind, int shade) {
+    CV o[8]; int m = 0;
+    for (int k = 0; k < n && m < 7; k++) {
+        const CV& p = v[k]; const CV& q = v[(k + 1) % n];
+        bool pin = p.dep >= NEAR_D, qin = q.dep >= NEAR_D;
+        if (pin) o[m++] = p;
+        if (pin != qin) o[m++] = lerpCV(p, q, (NEAR_D - p.dep) / (q.dep - p.dep));
+    }
+    if (m < 3) return;
+    SV sv[8];
+    for (int k = 0; k < m; k++) sv[k] = projCV(o[k]);
+    for (int k = 1; k + 1 < m; k++) fillTri(sv[0], sv[k], sv[k + 1], kind, shade);
+}
+static void line3(float ax, float ay, float az, float bx, float by, float bz, uint8_t col, int thick) {
+    CV p = camPt(ax, ay, az, 0.f), q = camPt(bx, by, bz, 0.f);
+    if (p.dep < NEAR_D && q.dep < NEAR_D) return;
+    if (p.dep < NEAR_D) p = lerpCV(p, q, (NEAR_D - p.dep) / (q.dep - p.dep));
+    else if (q.dep < NEAR_D) q = lerpCV(q, p, (NEAR_D - q.dep) / (p.dep - q.dep));
+    SV a = projCV(p), b = projCV(q);
+    float dx = b.x - a.x, dy = b.y - a.y;
+    int n = (int)fmaxf(fabsf(dx), fabsf(dy)) + 1;
+    if (n > 480) n = 480;
+    float inv = 1.f / n;
+    for (int k = 0; k <= n; k++) {
+        float t = k * inv;
+        int x = ifloor(a.x + dx * t), y = ifloor(a.y + dy * t);
+        if ((unsigned)y >= (unsigned)H) continue;
+        float w = a.w + (b.w - a.w) * t;
+        if (w <= 0.f) continue;
+        float dep; uint8_t zc = zcodeW(w, dep);
+        for (int j = 0; j < thick; j++) {
+            int xx = x - thick / 2 + j;
+            if ((unsigned)xx >= (unsigned)W || y >= s_bottom[xx]) continue;
+            int i = y * W + xx;
+            if (zb[i] <= zc) continue;
+            fb[i] = fogged(col, dep, xx, y); zb[i] = zc;
+        }
+    }
+}
+static inline bool roughlyInView(float x, float z, float maxD) {
+    float dx = x - cx, dz = z - cz, d = dx * fx + dz * fz, l = dx * rx + dz * rz;
+    return d > -12.f && d < maxD && fabsf(l) < fmaxf(d, 0.f) * 1.1f + 20.f;
+}
+static inline int timberShade(float nx, float nz) {  // a vertical timber face lit by the sun (the deck's top: flat light)
+    float lt = 0.22f + 0.62f * fmaxf(0.f, nx * s_sunDx + nz * s_sunDz) * s_sunK;
+    return clampi((int)(lt * 8.f) - 1, 0, 5);
+}
+static void drawDeckSeg(const RoadNode& a, const RoadNode& b) {
+    if (!roughlyInView(a.x, a.z, 320.f) && !roughlyInView(b.x, b.z, 320.f)) return;
+    const float ha = a.half20 * 0.05f + 0.3f, hb = b.half20 * 0.05f + 0.3f;
+    const float pax = -sinf(a.yaw), paz = cosf(a.yaw), pbx = -sinf(b.yaw), pbz = cosf(b.yaw);
+    const float ya = a.y + 0.13f, yb = b.y + 0.13f;                  // just above the road's crown at the abutments
+    CV top[4] = { camPt(a.x + pax * ha, ya, a.z + paz * ha, a.s), camPt(b.x + pbx * hb, yb, b.z + pbz * hb, b.s),
+                  camPt(b.x - pbx * hb, yb, b.z - pbz * hb, b.s), camPt(a.x - pax * ha, ya, a.z - paz * ha, a.s) };
+    fillPoly(top, 4, 0, clampi((int)(s_light[0x88] * 8.f), 1, 6));
+    for (int e = -1; e <= 1; e += 2) {                 // the stringer along each side, and the rail
+        float qax = a.x + pax * ha * e, qaz = a.z + paz * ha * e, qbx = b.x + pbx * hb * e, qbz = b.z + pbz * hb * e;
+        CV side[4] = { camPt(qax, ya, qaz, 0.f), camPt(qbx, yb, qbz, 0.f), camPt(qbx, yb - 0.7f, qbz, 0.f), camPt(qax, ya - 0.7f, qaz, 0.f) };
+        int sh = timberShade(pax * e, paz * e);
+        fillPoly(side, 4, 1, sh);
+        line3(qax, ya + 0.95f, qaz, qbx, yb + 0.95f, qbz, (uint8_t)(P_BARK + clampi(sh + 2, 0, 7)), 1);
+    }
+}
+static void drawBent(const RoadNode& n) {              // the trestle's legs at this node, braced when tall
+    if (!roughlyInView(n.x, n.z, 260.f)) return;
+    const float hf = n.half20 * 0.05f;
+    const float px = -sinf(n.yaw), pz = cosf(n.yaw);
+    const float top = n.y + 0.05f - 0.7f;
+    float lx[2], lz[2], gy[2];
+    for (int e = 0; e < 2; e++) {
+        float o = (e ? -1.f : 1.f) * (hf - 0.2f);
+        lx[e] = n.x + px * o; lz[e] = n.z + pz * o;
+        gy[e] = terrainHeight(lx[e], lz[e]);           // the land, or the road under the deck
+    }
+    float tall = top - fminf(gy[0], gy[1]);
+    if (tall < 0.4f) return;
+    float d = (n.x - cx) * fx + (n.z - cz) * fz;
+    int thick = clampi((int)(0.28f * F / fmaxf(d, 1.f)), 1, 5);
+    int sh = timberShade(px, pz);
+    uint8_t c = (uint8_t)(P_BARK + sh), c2 = (uint8_t)(P_BARK + clampi(sh - 1, 0, 7));
+    for (int e = 0; e < 2; e++) if (top - gy[e] > 0.3f) line3(lx[e], top, lz[e], lx[e], gy[e] - 0.2f, lz[e], c, thick);
+    if (tall > 2.5f) {                                 // a cross-tie and an X brace
+        float low = fmaxf(gy[0], gy[1]) + 0.3f;
+        line3(lx[0], top - 0.3f, lz[0], lx[1], top - 0.3f, lz[1], c2, 1);
+        line3(lx[0], top - 0.3f, lz[0], lx[1], low, lz[1], c2, 1);
+        line3(lx[1], top - 0.3f, lz[1], lx[0], low, lz[0], c2, 1);
+    }
+}
+static inline void putFog(int x, int y, uint8_t c, uint8_t zc, float dep) {
+    if ((unsigned)x >= (unsigned)W || (unsigned)y >= (unsigned)H) return;
+    int i = y * W + x;
+    if (zb[i] <= zc) return;
+    fb[i] = fogged(c, dep, x, y); zb[i] = zc;
+}
+// the yellow caution triangle, point up on a post, black outline; retroreflective: it lights up in the headlights
+static void drawCaution(const RoadNode& n, int side) {
+    const float hf = n.half20 * 0.05f;
+    float wx = n.x - sinf(n.yaw) * side * (hf + 1.9f), wz = n.z + cosf(n.yaw) * side * (hf + 1.9f);
+    if (!roughlyInView(wx, wz, 165.f)) return;
+    float gy = terrainHeight(wx, wz);
+    float sx, sy, d;
+    if (!renderProject(wx, gy, wz, sx, sy, d) || d > 160.f || d < 1.f) return;
+    float pw = 1.6f * F / d, post = 1.8f * F / d, th = pw * 0.87f;   // 1.6 m: readable at this resolution
+    uint8_t zc = zcode(d);
+    float hk = headAt((wx - cx) * rx + (wz - cz) * rz, d);
+    uint8_t fill = (uint8_t)(P_LINE_Y + (hk > 0.25f ? 3 : 2));
+    int xs = ifloor(sx);
+    int postW = pw > 12.f ? 2 : 1;
+    for (int y = ifloor(sy - post); y < ifloor(sy); y++) for (int k = 0; k < postW; k++) putFog(xs + k, y, P_BLACK, zc, d);
+    if (pw < 2.5f) { putFog(xs, ifloor(sy - post) - 1, fill, zc, d); return; }
+    float y1 = sy - post, y0 = y1 - th;
+    int ot = pw > 16.f ? 2 : 1;
+    int r0 = iceil(y0), r1 = ifloor(y1);
+    float ih = 1.f / (y1 - y0);
+    for (int y = r0; y <= r1; y++) {
+        float hw = (y - y0) * ih * pw * 0.5f;
+        int xl = ifloor(sx - hw), xr = ifloor(sx + hw);
+        for (int x = xl; x <= xr; x++) {
+            bool edge = x < xl + ot || x > xr - ot || y > r1 - ot || y < r0 + ot;
+            putFog(x, y, edge ? (uint8_t)P_BLACK : fill, zc, d);
+        }
+    }
+}
+static void structuresOn(bool arm, int lo, int hi) {
+    const int n = arm ? roadArmCount() : roadCount();
+    for (int i = lo; i <= hi; i++) {
+        const RoadNode& a = arm ? roadArmNode(i) : roadNode(i);
+        if (!(a.flags & (RN_BRIDGE | RN_CAUTION))) continue;
+        if (a.flags & RN_CAUTION) {
+            if (a.side & RN_SIDE_CAUTION_R) drawCaution(a, 1);
+            if (a.side & RN_SIDE_CAUTION_L) drawCaution(a, -1);
+        }
+        if (!(a.flags & RN_BRIDGE)) continue;
+        drawBent(a);
+        if (i + 1 < n) { const RoadNode& b = arm ? roadArmNode(i + 1) : roadNode(i + 1); if (b.flags & RN_BRIDGE) drawDeckSeg(a, b); }
+    }
+}
+static void drawRoadStructures() {
+    int n = roadCount();
+    if (n > 1) {
+        int c = roadCarIndex();
+        int lo = c - 40 < 0 ? 0 : c - 40, hi = c + 140 > n - 1 ? n - 1 : c + 140;
+        structuresOn(false, lo, hi);
+    }
+    if (roadArmMarked()) structuresOn(true, 0, roadArmCount() - 1);
+}
+
 static void drawCritters() {
     const Critter* c = fieldCritters();
     for (int k = 0; k < CRIT_N; k++) {
@@ -1138,7 +1418,8 @@ MR_HOT static void reflectPass() {
             uint8_t src = ym >= 0 ? fb[ym * W + xs] : (uint8_t)P_SKY;
             uint8_t r = s_refl[src];
             float fres = clampf(1.f - (y - horX[x]) / 55.f, 0.25f, 1.f);
-            float gp = s_gpat ? s_gpat[i] * (1.f / 255.f) : dith(x, y);   // the reflecting surface's own dither
+            // lakes keep the screen dither they were approved with; only wet road and mud use the surface's own grain
+            float gp = (water || !s_gpat) ? dith(x, y) : s_gpat[i] * (1.f / 255.f);
             if (water) fb[i] = (fres > gp) ? r : cur;
             else if (s_wet * 0.55f * fres > gp) fb[i] = r;
         }
@@ -1244,13 +1525,15 @@ static void drawBolt() {
 static void drawMist() {
     float mist = S.mist * 0.4f + g_scene.mist + g_scene.fog * 0.35f;
     if (mist < 0.04f) return;
+    float rowK[28];                                          // 1 - |y - hy - 3| / 15 for the band's 28 rows
+    for (int r = 0; r < 28; r++) rowK[r] = 1.f - fabsf((float)(r - 13)) / 15.f;
     for (int x = 0; x < W; x++) {
         int hy = (int)horX[x];
         for (int y = hy - 10; y < hy + 18; y++) {
             if (y < 0 || y >= H) continue;
-            float k = mist * (1.f - fabsf((float)(y - hy - 3)) / 15.f) * (0.7f + 0.3f * tex((int)((x + cyaw * F) * 0.1f), (int)(y * 0.4f + s_t * 0.3f)) * (1.f / 255.f));
             int i = y * W + x;
             if (zb[i] <= 60) continue;
+            float k = mist * rowK[y - (hy - 10)] * (0.7f + 0.3f * tex((int)((x + cyaw * F) * 0.1f), (int)(y * 0.4f + s_t * 0.3f)) * (1.f / 255.f));
             float gp = s_gpat ? s_gpat[i] * (1.f / 255.f) : (((x ^ y) & 1) ? 0.f : 1.f);   // the grain of the land under the mist
             float ma = clampf((k - 0.12f) * 2.2f, 0.f, 1.f);         // mist: the land under it steps to its fogged twins
             if (ma > 0.f) fb[i] = fogTwin(fb[i], ma, gp);
@@ -1656,6 +1939,7 @@ void renderFrame() {
     drawClouds();
     drawBolt();
     drawBirds();
+    drawRoadStructures();
     drawVegetation();
     drawSignAndStore();
     drawCritters();

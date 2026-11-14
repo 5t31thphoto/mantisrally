@@ -50,14 +50,15 @@ static void placeOnRoad(bool keepPos) {
     float x = car.x, z = car.z, yaw = car.yaw;
     if (!keepPos) { x = 0.f; z = 0.f; }
     int dir = (keepPos && t - s_onRoadT < 30.f) ? s_roadDir : 0;    // lost control on your way somewhere: back on course
-    roadRecover(x, z, yaw, 1.5f, dir);
-    vehicleReset(car, veh, x, z, yaw);
+    float roadY = 1e9f;
+    roadRecover(x, z, yaw, 1.5f, dir, &roadY);
+    vehicleReset(car, veh, x, z, yaw, roadY);                   // onto that road's own height (a deck, or the road under it)
 }
 
 static void switchVehicle(uint8_t v) {
-    float x = car.x, z = car.z, yaw = car.yaw;
+    float x = car.x, z = car.z, yaw = car.yaw, gy = car.lastGY;
     veh = v;
-    vehicleReset(car, veh, x, z, yaw);
+    vehicleReset(car, veh, x, z, yaw, gy);
     renderSetVehicle(veh);
     g_car.engine = vehicleSpec(veh).engine;
 }

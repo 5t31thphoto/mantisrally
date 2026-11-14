@@ -63,11 +63,11 @@ static float rollRes(uint8_t surf) {
     return RR[surf & 7];
 }
 
-void vehicleReset(VehicleState& s, uint8_t id, float x, float z, float yaw) {
+void vehicleReset(VehicleState& s, uint8_t id, float x, float z, float yaw, float refY) {
     const VehicleSpec& V = vehicleSpec(id);
     memset(&s, 0, sizeof(s));
     s.x = x; s.z = z; s.yaw = yaw;
-    Ground g; terrainGround(x, z, g);
+    Ground g; terrainGroundRef(x, z, refY, g);
     float top = g.h + (g.mat == MAT_WATER ? g.water : 0.f);
     s.y = top + V.rideHeight; s.lastGY = top;
     s.gear = 1; s.rpm = V.idleRpm;
@@ -92,8 +92,8 @@ static inline float pac(float alpha, float C, float peak) {
     return sinf(C * atanf(B * a));
 }
 
-static void groundAt(float x, float z, float& h, Ground& g) {
-    terrainGround(x, z, g);
+static void groundAt(float x, float z, float refY, float& h, Ground& g) {
+    terrainGroundRef(x, z, refY, g);                         // on a trestle deck when you're up at its level
     h = g.h + (g.mat == MAT_WATER ? g.water * 0.35f : 0.f);   // wading: you sit partly in it
 }
 
@@ -105,12 +105,13 @@ static void substep(VehicleState& s, const VehicleSpec& V, uint8_t id, const Veh
     // ---- ground under the four corners ----
     Ground gc, gf, gr, gl, grt;
     float hF, hR, hL, hRt, hC;
-    groundAt(s.x + cy * a, s.z + sy * a, hF, gf);
-    groundAt(s.x - cy * b, s.z - sy * b, hR, gr);
+    const float refY = s.lastGY;
+    groundAt(s.x + cy * a, s.z + sy * a, refY, hF, gf);
+    groundAt(s.x - cy * b, s.z - sy * b, refY, hR, gr);
     float tw = V.bike ? 0.5f : V.track * 0.5f;
-    groundAt(s.x + sy * tw, s.z - cy * tw, hL, gl);         // left = -right
-    groundAt(s.x - sy * tw, s.z + cy * tw, hRt, grt);
-    groundAt(s.x, s.z, hC, gc);
+    groundAt(s.x + sy * tw, s.z - cy * tw, refY, hL, gl);   // left = -right
+    groundAt(s.x - sy * tw, s.z + cy * tw, refY, hRt, grt);
+    groundAt(s.x, s.z, refY, hC, gc);
     float gY = (hF * b + hR * a) / L * 0.7f + hC * 0.3f;
     float slopeF = (hF - hR) / L;                    // + uphill
     float slopeR = (hRt - hL) / (2.f * tw);          // + right side higher

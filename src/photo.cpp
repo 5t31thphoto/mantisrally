@@ -29,7 +29,7 @@ bool photoActive() { return s_on; }
 void photoEnter(const VehicleState& car, uint8_t vehicle) {
     s_on = true; s_veh = vehicle; s_angle = SHOT_RIGHT;
     s_cx = car.x; s_cz = car.z; s_yaw = car.yaw;
-    s_cg = terrainHeight(car.x, car.z);
+    s_cg = terrainHeightRef(car.x, car.z, car.lastGY);        // the ground the car is on (a deck too)
     s_pan = s_tilt = 0.f; s_freeYaw = car.yaw; s_label = 1.5f; s_flash = 0.f;
 }
 void photoExit() { s_on = false; renderPhotoClear(); g_view.photo = false; }
