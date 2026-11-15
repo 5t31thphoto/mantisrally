@@ -43,8 +43,14 @@ int main() {
       int k = best + 4 < roadArmCount() ? best + 4 : roadArmCount() - 1;
       tx = roadArmNode(k).x; tz = roadArmNode(k).z;
     } else {
+      // follow the road it is on (where two stretches cross, the nearest point can be the other one: the game tracks
+      // the car along its own road, and so does this driver)
+      int ci = roadCarIndex();
+      bool own = !r.arm && ci >= 0 && ci < roadCount() && hypotf(roadNode(ci).x - x, roadNode(ci).z - z) < 30.f;
       int n = r.arm ? roadArmCount() : roadCount();
-      int k = r.idx + dir * 4; k = k < 0 ? 0 : (k > n - 1 ? n - 1 : k);
+      int base = own ? ci : r.idx;
+      if (own) dir = cosf(yaw - roadNode(ci).yaw) >= 0 ? 1 : -1;
+      int k = base + dir * 4; k = k < 0 ? 0 : (k > n - 1 ? n - 1 : k);
       const RoadNode& p = r.arm ? roadArmNode(k) : roadNode(k);
       tx = p.x; tz = p.z;
     }
@@ -57,6 +63,7 @@ int main() {
     journeyUpdate(moved, yaw, true);
     journeySetCar(x, z, yaw, moved);
     float y = first ? terrainHeight(x, z) : terrainHeightRef(x, z, lastY);   // what the wheels drive on (decks too)
+    if ((r.flags & RN_BRIDGE) && !first && lastY < r.y - 1.2f) roadNearest(x, z, r, 300.f, RN_BRIDGE);   // under a deck: the road below
     CHECK(std::isfinite(y), "height NaN at %.1f mi", dist / MILE);
     if (!first) { float g = fabsf(y - lastY) / fmaxf(moved, 0.1f); if (g > maxGrade && fabsf(r.across) < r.half) maxGrade = g;
       if (g > 0.6f && fabsf(r.across) < r.half) {           // count places, not passes (the test driver can loop)

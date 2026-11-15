@@ -67,6 +67,7 @@ struct Gen {
     // can be both at once): what is being built there, and where along the other road
     struct Meet {
         uint8_t mode, n;                 // XM_*, nodes in contact so far
+        uint8_t oArm;                    // the other road is the arm
         int8_t side;                     // which side of the other road we met it on
         float oldS, sLo, sHi;            // along the other road: now, and the stretch we have passed over / under
         float clear;                     // the deck's clearance (5 m; 3.5 m where there's no room to ramp)
@@ -80,6 +81,8 @@ static void rebakeAround(float x, float z, float r);
 static void rebakeLater(float x, float z, float r);
 static void rebakeCancel();
 static void avoidSelf(struct Gen& g, const RoadNode& n, int dir);
+static void avoidArm(struct Gen& g, const RoadNode& n, int dir);
+static void deckLaterClear();
 static void crossCheck(Gen& g, bool growArm, int dir);
 static void crossEnd(Gen& g, Gen::Meet& x, bool growArm, int dir);
 static Junction s_junc;
@@ -195,7 +198,7 @@ static void startRoad(float x, float z, float yaw) {
     s_gF.segLeft = s_gB.segLeft = 60.f;
     s_carIdx = 0;
     s_junc.active = false; s_sign.active = false; s_armN = 0;
-    s_mmSign.active = false; s_storePending = false; rebakeCancel();
+    s_mmSign.active = false; s_storePending = false; rebakeCancel(); deckLaterClear();
 }
 
 int roadCount() { return s_cnt; }
@@ -220,6 +223,8 @@ static float segProject(const RoadNode& a, const RoadNode& b, float x, float z, 
     return px * px + pz * pz;
 }
 
+// a stretch of one road left out of the nearest-point search (a deck's own approaches, when looking for what's under it)
+static struct { bool on, arm; float s0, s1; } s_ex = {false, false, 0.f, 0.f};
 static bool nearestOn(bool arm, int n, float x, float z, RoadHit& out, float maxD2, uint8_t skip = 0) {
     if (n < 2) return false;
     // coarse pass every 4th node; keep the 3 best local minima (switchback legs are separate minima),
@@ -248,6 +253,7 @@ static bool nearestOn(bool arm, int n, float x, float z, RoadHit& out, float max
         if (hi > n - 2) hi = n - 2;
         for (int i = lo; i <= hi; i++) {
             if (skip && (pnode(arm, i).flags & pnode(arm, i + 1).flags & skip)) continue;     // a deck: not this road's land
+            if (s_ex.on && s_ex.arm == arm) { float sa = pnode(arm, i).s; if (sa >= s_ex.s0 && sa <= s_ex.s1) continue; }
             float t; float d = segProject(pnode(arm, i), pnode(arm, i + 1), x, z, t);
             if (d < best) { best = d; bi = i; bt = t; }
         }
@@ -324,6 +330,19 @@ bool roadRecover(float& x, float& z, float& yaw, float edge, int dirAlong, float
 }
 
 // ---- junctions, signs, stores ----
+// Is the road's newest node clear of every other stretch of road by r (the stretch just built excepted)? A fork's Y
+// shares one grade for its first nodes and can't ramp: it goes where nothing else will cross it.
+static bool roomAround(const RoadNode& q, int dir, float r) {
+    const int endI = dir > 0 ? s_cnt - 1 : 0;
+    for (int i = 0; i < s_cnt; i += 2) {
+        int fe = dir > 0 ? endI - i : i;
+        if (fe < 40) continue;
+        const RoadNode& p = nodeAt(i);
+        if (sq(p.x - q.x) + sq(p.z - q.z) < r * r) return false;
+    }
+    for (int i = 0; i < s_armN; i += 2) if (sq(s_arm[i].x - q.x) + sq(s_arm[i].z - q.z) < r * r) return false;
+    return true;
+}
 static void spawnJunction(int dir) {
     int ji = dir > 0 ? s_cnt - 1 : 0;
     RoadNode J = nodeAt(ji);
@@ -353,7 +372,7 @@ static void spawnJunction(int dir) {
     RoadNode prev = J;
     for (int k = 1; k < ARM_MAX; k++) {
         RoadNode n = genStep(s_gA, prev, dir);
-        if (k > 12) avoidSelf(s_gA, n, dir);
+        if (k > 12) avoidArm(s_gA, n, dir);
         s_arm[s_armN++] = n;
         crossCheck(s_gA, true, dir);                     // meeting the road: a crossing, a deck, or the shelf as it is
         rebakeAround(n.x, n.z, n.half20 * 0.05f + 10.f);
@@ -426,6 +445,16 @@ static void spawnStore(int dir) {
 }
 
 // The road never crosses itself: if a new node comes near the road's own body, it bends away.
+static void steerAway(Gen& g, const RoadNode& n, int dir, float px, float pz, bool close, float best) {
+    float h = dir > 0 ? n.yaw : n.yaw + PI_F;
+    float side = cosf(h) * (pz - n.z) - sinf(h) * (px - n.x);       // + : the old road is on our right
+    int away = side > 0.f ? -1 : 1;
+    float R = close ? 18.f : (best < 40.f * 40.f ? 22.f : 35.f);
+    g.seg = SEG_TIGHT; g.sign = (int8_t)away; g.pending = 0;
+    g.tCurv = away / R; g.segLeft = close ? 20.f : 40.f;
+    g.curv = g.curv * 0.5f + g.tCurv * 0.5f;
+    g.baseYaw = h + away * 1.2f;
+}
 static void avoidSelf(Gen& g, const RoadNode& n, int dir) {
     // far body: stay 55 m clear.  near body (switchback legs): never closer than 18 m.
     float best = 1e9f; int bi = -1; bool close = false;
@@ -439,14 +468,31 @@ static void avoidSelf(Gen& g, const RoadNode& n, int dir) {
     }
     if (bi < 0) return;
     const RoadNode& p = nodeAt(bi);
-    float h = dir > 0 ? n.yaw : n.yaw + PI_F;
-    float side = cosf(h) * (p.z - n.z) - sinf(h) * (p.x - n.x);   // + : the old road is on our right
-    int away = side > 0.f ? -1 : 1;
-    float R = close ? 18.f : (best < 40.f * 40.f ? 22.f : 35.f);
-    g.seg = SEG_TIGHT; g.sign = (int8_t)away; g.pending = 0;
-    g.tCurv = away / R; g.segLeft = close ? 20.f : 40.f;
-    g.curv = g.curv * 0.5f + g.tCurv * 0.5f;
-    g.baseYaw = h + away * 1.2f;
+    steerAway(g, n, dir, p.x, p.z, close, best);
+}
+// A fork's branch, as it is built: the same rules against the road (but the road's last 20 nodes, the Y, only while
+// the branch is still leaving it: 40 nodes) and against its own body (it never knotted into itself before only
+// because nothing looked).
+static void avoidArm(Gen& g, const RoadNode& n, int dir) {
+    float best = 1e9f, bx = 0.f, bz = 0.f; bool close = false, found = false;
+    const int k = s_armN;                                            // the index n will take
+    for (int i = 0; i < s_cnt; i += 2) {
+        int fromEnd = dir > 0 ? s_cnt - 1 - i : i;
+        if (fromEnd < 20 && k < 40) continue;
+        const RoadNode& p = nodeAt(i);
+        float d = sq(p.x - n.x) + sq(p.z - n.z);
+        bool c = fromEnd < 40 && k < 40;
+        float lim = c ? 18.f : 55.f;
+        if (d < lim * lim && d < best) { best = d; bx = p.x; bz = p.z; close = c; found = true; }
+    }
+    for (int i = 1; i + 20 < k; i += 2) {
+        const RoadNode& p = s_arm[i];
+        float d = sq(p.x - n.x) + sq(p.z - n.z);
+        bool c = k - i < 40;
+        float lim = c ? 18.f : 55.f;
+        if (d < lim * lim && d < best) { best = d; bx = p.x; bz = p.z; close = c; found = true; }
+    }
+    if (found) steerAway(g, n, dir, bx, bz, close, best);
 }
 
 // =====================================================================================================
@@ -482,6 +528,46 @@ static bool nearSpecial(float x, float z) {  // the fork's split, the dealership
     if (s_mmSign.active && sq(x - s_mmSign.x) + sq(z - s_mmSign.z) < 30.f * 30.f) return true;
     return false;
 }
+// Is this stretch of the older road part of the fork's Y itself (where both roads leave the split together and share
+// cells)? Measured along the road, not as a radius: a branch can loop back past its own split at a distance. Decking it
+// changes no heights, so only the Y (and the deck's 3-node margin) is off limits; the dealership and its arrow stay out.
+static bool storeStretch(bool arm, float s);
+static RoadNode* polyNodeAtS(bool arm, float s);
+static bool olderOffLimits(bool arm, float s, float x, float z) {
+    if (s_store.active && sq(x - s_store.x) + sq(z - s_store.z) < 70.f * 70.f && storeStretch(arm, s)) return true;
+    if (s_mmSign.active && sq(x - s_mmSign.x) + sq(z - s_mmSign.z) < 30.f * 30.f) return true;
+    if (!s_junc.active) return false;
+    if (arm) {
+        if (s_armN < 2) return true;
+        float k = fabsf(s - s_arm[0].s) / ROAD_DS;
+        return k < 14.f + 3.f + 1.f;
+    }
+    return fabsf(s - s_junc.s) < (14.f + 3.f + 1.f) * ROAD_DS;
+}
+// May a ramp change this node's height? Not in the fork's Y (both roads share its cells and grade), not on the
+// dealership's own stretch (its lot is flat at that road's height). Elsewhere near them, yes (the arrow sign stands
+// on whatever ground is there).
+static bool rampLocked(const RoadNode* r, bool onArm) {
+    if (onArm) return false;                                       // (the arm's own Y: checked by index)
+    if (s_junc.active) {                                           // the Y: the split and 18 nodes on (where the arm leaves)
+        float k = (r->s - s_junc.s) * (float)s_junc.dir / ROAD_DS;
+        if (k > -6.f && k < 18.f) return true;
+    }
+    if (s_store.active && sq(r->x - s_store.x) + sq(r->z - s_store.z) < 50.f * 50.f) {
+        int idx = (int)(((r - s_rn) - s_base) & RM);
+        for (int i = idx - 12; i <= idx + 12; i++) if (i >= 0 && i < s_cnt && (nodeAt(i).flags & RN_STORE)) return true;
+    }
+    return false;
+}
+// the dealership's own stretch of road (12 nodes either side of its node): its lot is flat at that road's height
+static bool storeStretch(bool arm, float s) {
+    if (arm) return false;
+    RoadNode* r = polyNodeAtS(false, s);
+    if (!r) return false;
+    int idx = (int)(((r - s_rn) - s_base) & RM);
+    for (int i = idx - 12; i <= idx + 12; i++) if (i >= 0 && i < s_cnt && (nodeAt(i).flags & RN_STORE)) return true;
+    return false;
+}
 // k nodes behind the newest node of the road being grown (the deque's front or back end, or the arm being built)
 static RoadNode* growBack(bool arm, int dir, int k) {
     if (k < 0) return nullptr;
@@ -508,15 +594,22 @@ static bool findOther(const RoadNode& q, bool growArm, int dir, bool onArm, Othe
     float best = 30.f * 30.f; int bi = -1; bool barm = false;
     const int endI = dir > 0 ? s_cnt - 1 : 0;
     const int skipN = growArm ? 25 : 20;
+    const bool armOut = growArm && s_armN > 40;                       // the branch is clear of the Y
     for (int i = 0; !onArm && i < s_cnt; i += 2) {
         int fromEnd = dir > 0 ? endI - i : i;
-        if (fromEnd < skipN) continue;
+        if (fromEnd < skipN && !armOut) continue;
         const RoadNode& p = nodeAt(i);
         float d = sq(p.x - q.x) + sq(p.z - q.z);
         if (d < best) { best = d; bi = i; barm = false; }
     }
+    for (int i = 1; growArm && i + 20 < s_armN - 1; i += 2) {         // the branch meeting its own body
+        const RoadNode& p = s_arm[i];
+        float d = sq(p.x - q.x) + sq(p.z - q.z);
+        if (d < best) { best = d; bi = i; barm = true; }
+    }
     if (onArm && !growArm && s_armN > 1) {
-        bool nearJ = s_junc.active && sq(q.x - s_junc.x) + sq(q.z - s_junc.z) < 40.f * 40.f;   // the Y itself
+        // the Y itself: this node is the road leaving its own split (not the road coming back past it much later)
+        bool nearJ = s_junc.active && fabsf(q.s - s_junc.s) < 25.f * ROAD_DS && sq(q.x - s_junc.x) + sq(q.z - s_junc.z) < 40.f * 40.f;
         for (int i = 1; i < s_armN; i += 2) {
             const RoadNode& p = s_arm[i];
             if (nearJ && sq(p.x - s_junc.x) + sq(p.z - s_junc.z) < 40.f * 40.f) continue;
@@ -529,7 +622,8 @@ static bool findOther(const RoadNode& q, bool growArm, int dir, bool onArm, Othe
     float bd = 1e30f, bt = 0.f; int bs = -1;
     for (int i = bi - 2; i <= bi + 1; i++) {
         if (i < 0 || i + 1 >= n) continue;
-        if (!barm) { int fe = dir > 0 ? endI - (i + 1) : i; if (fe < skipN - 2) continue; }
+        if (!barm && !armOut) { int fe = dir > 0 ? endI - (i + 1) : i; if (fe < skipN - 2) continue; }
+        if (barm && growArm && i + 1 + 20 >= s_armN - 1) continue;
         float t; float d = segProject(pnode(barm, i), pnode(barm, i + 1), q.x, q.z, t);
         if (d < bd) { bd = d; bs = i; bt = t; }
     }
@@ -563,11 +657,12 @@ static bool crossRamp(bool growArm, int dir, float dy, int minM) {
     int avail = 0;
     for (int k = 1; k <= M; k++) {
         RoadNode* r = growBack(growArm, dir, k);
-        if (!r || !(growArm || editable(r, false, 200.f)) || (r->flags & (RN_BRIDGE | RN_XING | RN_STORE)) || nearSpecial(r->x, r->z)) break;
+        if (!r || !(growArm || editable(r, false, 200.f)) || (r->flags & (RN_BRIDGE | RN_XING | RN_STORE)) || rampLocked(r, growArm)) break;
         if (growArm && s_armN - 1 - k < 14) break;                     // the fork's two roads leave the split together
         avail = k;
     }
     if (avail < 3) return false;
+    if (1.5f * fabsf(dy) > avail * ROAD_DS * 0.12f) return false;        // shorter than needed: never steeper than 12 %
     M = avail;
     float x0 = 1e30f, x1 = -1e30f, z0 = 1e30f, z1 = -1e30f;
     for (int k = 0; k < M; k++) {                                      // node M itself is where the ramp starts: unchanged
@@ -589,8 +684,7 @@ static uint8_t crossPick(const RoadNode& n, const Other& o, float gap) {
     if (cLevel <= X_RAMP_REACH) { best = cLevel; m = XM_LEVEL; }
     if (cOver <= X_RAMP_REACH && cOver < best) { best = cOver; m = XM_OVER; }
     RoadNode* on = polyNodeAtS(o.arm, o.s);
-    bool underOk = on && o.py - X_CLEAR >= terrainWaterLevel(n.x, n.z) + 1.0f && !nearSpecial(o.px, o.pz)
-                   && editable(on, o.arm, cUnder < 0.01f ? 60.f : 150.f);
+    bool underOk = on && (cUnder < 0.01f || o.py - X_CLEAR >= terrainWaterLevel(n.x, n.z) + 1.0f) && !olderOffLimits(o.arm, o.s, o.px, o.pz);
     if (underOk && cUnder <= X_RAMP_REACH && cUnder < best) m = XM_UNDER;
     return m;
 }
@@ -642,6 +736,7 @@ static void crossStart(Gen& g, Gen::Meet& x, RoadNode& n, const Other& o, bool g
     float ang = fabsf(wrapPi(h - o.yaw));
     if (ang > 0.5f * PI_F) ang = PI_F - ang;
     float gap = n.y - o.py;
+    x.oArm = o.arm ? 1 : 0;
     x.oldS = x.sLo = x.sHi = o.s; x.side = (int8_t)(o.lat >= 0.f ? 1 : -1); x.n = 0;
     uint8_t m = XM_LEVEL;
     if (ang >= X_SHALLOW) m = crossPick(n, o, gap);
@@ -651,7 +746,7 @@ static void crossStart(Gen& g, Gen::Meet& x, RoadNode& n, const Other& o, bool g
         // no room to ramp (another crossing right behind): a deck as the heights already are, if they clear 3.5 m
         RoadNode* on = polyNodeAtS(o.arm, o.s);
         if (ang >= X_SHALLOW && gap >= 3.5f) { x.mode = XM_OVER; x.clear = 3.5f; }
-        else if (ang >= X_SHALLOW && gap <= -3.5f && on && editable(on, o.arm, 150.f) && !nearSpecial(o.px, o.pz)) { x.mode = XM_UNDER; x.clear = 3.5f; }
+        else if (ang >= X_SHALLOW && gap <= -3.5f && on && !olderOffLimits(o.arm, o.s, o.px, o.pz)) { x.mode = XM_UNDER; x.clear = 3.5f; }
         else { x.mode = XM_SKIP; return; }                                // not again until this meeting ends
     }
     crossHold(g, x, n, o, growArm, dir);
@@ -662,6 +757,7 @@ static void deckOlder(bool arm, float sLo, float sHi) {
     for (float s = sLo; s <= sHi + 0.01f; s += ROAD_DS) {
         RoadNode* r = polyNodeAtS(arm, s);
         if (!r || (r->flags & (RN_STORE | RN_XING))) continue;
+        if (s_junc.active && (arm ? fabsf(s - s_arm[0].s) : fabsf(s - s_junc.s)) < 15.f * ROAD_DS) continue;   // never the Y
         r->flags |= RN_BRIDGE; any = true;
         x0 = fminf(x0, r->x); x1 = fmaxf(x1, r->x); z0 = fminf(z0, r->z); z1 = fmaxf(z1, r->z);
     }
@@ -669,10 +765,46 @@ static void deckOlder(bool arm, float sLo, float sHi) {
     if (arm) s_armMarks = true;
     rebakeLater((x0 + x1) * 0.5f, (z0 + z1) * 0.5f, fmaxf(x1 - x0, z1 - z0) * 0.5f + 16.f);
 }
+// The older road's stretch becomes a deck now if the car is clear of it, else when it is (two can wait).
+struct DeckLater { bool on, arm; float sLo, sHi; };
+static DeckLater s_deckLater[2];
+static void deckLaterClear() { s_deckLater[0].on = s_deckLater[1].on = false; }
+static bool deckReady(bool arm, float sLo, float sHi) {
+    if (s_noCar) return true;
+    RoadNode* m = polyNodeAtS(arm, (sLo + sHi) * 0.5f);
+    if (!m) return true;
+    if (!farFromCar(m->x, m->z, 60.f)) return false;
+    if (arm) return true;
+    int idx = (int)(((m - s_rn) - s_base) & RM), d = idx - s_carIdx;
+    return d >= 20 || d <= -20;
+}
+static void deckWhenClear(bool arm, float sLo, float sHi) {
+    if (deckReady(arm, sLo, sHi)) { deckOlder(arm, sLo, sHi); return; }
+    for (int k = 0; k < 2; k++) if (!s_deckLater[k].on) { s_deckLater[k] = {true, arm, sLo, sHi}; return; }
+    deckOlder(arm, sLo, sHi);                                          // both waiting (never seen): now
+}
+static void deckLaterStep() {
+    for (int k = 0; k < 2; k++) {
+        DeckLater& d = s_deckLater[k];
+        if (!d.on) continue;
+        if (!polyNodeAtS(d.arm, (d.sLo + d.sHi) * 0.5f)) { d.on = false; continue; }   // dropped behind: nothing to do
+        if (deckReady(d.arm, d.sLo, d.sHi)) { d.on = false; deckOlder(d.arm, d.sLo, d.sHi); }
+    }
+}
 static void crossEnd(Gen& g, Gen::Meet& x, bool growArm, int dir) {
-    (void)growArm; (void)dir;
+    if (x.mode == XM_LEVEL || x.mode == XM_OVER || x.mode == XM_UNDER) {
+        // the cells there were baked node by node as the road grew, before the crossing had its final heights and
+        // flags: the whole meeting is baked again (a strip a frame, long before the car gets there)
+        float x0 = 1e30f, x1 = -1e30f, z0 = 1e30f, z1 = -1e30f;
+        for (int k = 0; k <= x.n + 2; k++) {
+            RoadNode* r = growBack(growArm, dir, k);
+            if (!r) break;
+            x0 = fminf(x0, r->x); x1 = fmaxf(x1, r->x); z0 = fminf(z0, r->z); z1 = fmaxf(z1, r->z);
+        }
+        if (x1 >= x0) rebakeLater((x0 + x1) * 0.5f, (z0 + z1) * 0.5f, fmaxf(x1 - x0, z1 - z0) * 0.5f + 20.f);
+    }
     if (x.mode == XM_LEVEL) g.xAfter = X_SIGN_BACK;                     // the sign for traffic coming the other way
-    if (x.mode == XM_UNDER) deckOlder(&x == &g.xm[1], x.sLo - 9.f, x.sHi + 9.f);
+    if (x.mode == XM_UNDER) deckWhenClear(x.oArm != 0, x.sLo - 9.f, x.sHi + 9.f);
     x.mode = XM_NONE; x.n = 0;
 }
 static void crossCheck(Gen& g, bool growArm, int dir) {
@@ -687,7 +819,7 @@ static void crossCheck(Gen& g, bool growArm, int dir) {
         Other o;
         bool contact = findOther(n, growArm, dir, k == 1, o) && o.d < n.half20 * 0.05f + o.half + 4.f;
         if (x.mode != XM_NONE) {
-            if (contact && fabsf(o.s - x.oldS) < 30.f) { crossHold(g, x, n, o, growArm, dir); continue; }
+            if (contact && (o.arm ? 1 : 0) == x.oArm && fabsf(o.s - x.oldS) < 30.f) { crossHold(g, x, n, o, growArm, dir); continue; }
             crossEnd(g, x, growArm, dir);
         }
         if (contact) crossStart(g, x, n, o, growArm, dir);
@@ -707,12 +839,12 @@ static void extend(int dir, bool facing) {
     if (!facing) return;
     bool calm = fabsf(g.curv) < 1.f / 140.f && g.pending == 0 && g.seg != SEG_HAIRPIN;
     if (s_storePending) {                                   // the sign is up: the store comes a quarter mile on
-        if (dir == s_storeDir && (n.s - s_storeAtS) * dir >= 0.f && calm) spawnStore(dir);
+        if (dir == s_storeDir && (n.s - s_storeAtS) * dir >= 0.f && calm && roomAround(n, dir, 70.f)) spawnStore(dir);   // its lot needs room too
         return;                                             // (and no fork between a sign and its store)
     }
     // a fork is placed only where it will be decided before the next biome transition starts, so every biome after
     // it is on the route you pick (mid-transition, the next biome was already chosen toward the old destination)
-    if (!s_junc.active && g.sinceJunc > g.nextJunc && calm && journeyMetersToTransition() > 900.f) spawnJunction(dir);
+    if (!s_junc.active && g.sinceJunc > g.nextJunc && calm && journeyMetersToTransition() > 900.f && roomAround(n, dir, 70.f)) spawnJunction(dir);
     // the store only goes on the road you are actually on: never while a fork ahead is undecided
     else if (!s_store.active && !s_mmSign.active && calm && g.sinceStore > g.nextStore * (s_storeReq ? 0.35f : 1.f)
              && (!s_junc.active || (s_junc.decided && fabsf(n.s - s_junc.s) > 400.f))) spawnStoreSign(dir);
@@ -745,6 +877,7 @@ static void takeArm() {
     else { s_base = (s_base + ji - nPlace) & RM; s_cnt = s_cnt - ji + nPlace; s_carIdx = s_carIdx - ji + nPlace; s_gB = s_gA; }
     s_armN = 1 + nKeep;
     s_armMarks = false;
+    deckLaterClear();                                              // the two roads swapped: a waiting deck would land wrong
     for (int k = 1; k < s_armN; k++) if (s_arm[k].flags & (RN_BRIDGE | RN_CAUTION)) { s_armMarks = true; break; }
 }
 
@@ -856,8 +989,17 @@ static void bakeCell(Grid& g, int ci, int cj) {
     bool road = roadNearest(x, z, rh, 40.f);
     bool underDeck = false;
     if (road && (rh.flags & RN_BRIDGE)) {                         // a trestle overhead: the land (or road) under it stays
-        underDeck = fabsf(rh.across) < rh.half + 3.2f;
-        road = roadNearest(x, z, rh, 40.f, RN_BRIDGE);
+        // what's under it: the nearest road that isn't a deck and isn't this deck's own approach (its road within 40 m)
+        RoadHit lo;
+        s_ex.on = true; s_ex.arm = rh.arm; s_ex.s0 = rh.along - 40.f - ROAD_DS; s_ex.s1 = rh.along + 40.f;
+        bool hasLo = roadNearest(x, z, lo, 40.f, RN_BRIDGE);
+        s_ex.on = false;
+        bool overRoad = hasLo && fabsf(lo.across) <= lo.half + 3.f && lo.y < rh.y - 2.5f;   // a road passes under here
+        if (overRoad || rh.y > n0 + 2.0f) {                       // a span: room under it (else an abutment: the road itself)
+            underDeck = fabsf(rh.across) < rh.half + 3.2f;
+            road = hasLo;                                         // the road under (or beside) it shapes the land; else land
+            if (road) rh = lo;
+        }
     }
     if (road && (rh.flags & RN_XING)) {                           // a level crossing: the older road's surface wins in its width
         RoadHit o;
@@ -1083,14 +1225,19 @@ void terrainRebuild() {
     float x = 0.f, z = 0.f;
     if (s_cnt > 0) { x = nodeAt(s_carIdx).x; z = nodeAt(s_carIdx).z; }
     windowCentres(x, z, nx, nz, fx, fz);
-    gridFill(s_near, nx, nz);
+    s_far.jobAxis = 2; s_far.jobPos = 0;                  // the far cache is about to be refilled: nothing in it counts yet
+    gridFill(s_near, nx, nz);                             // (a lake takes its level from water already dreamt: not stale cells)
     gridFill(s_far, fx, fz);
     gridMax(s_near); gridMax(s_far);
 }
 
+static void deckClear();
 void terrainInit(uint32_t seed) {
     s_seed = seed ? seed : 1;
     s_noCar = true;
+    // everything a world carries, from scratch (the game inits once; the host tests init many worlds in a row)
+    s_juncEvent = false; s_juncTookArm = false; s_storeReq = false; s_carDir = 1; s_carRoadDist = 0.f;
+    memset(&s_gA, 0, sizeof(s_gA)); s_armMarks = false; deckClear(); s_frame = 0;
     if (!s_rn) s_rn = (RoadNode*)memFast(sizeof(RoadNode) * RN);
     if (!s_arm) s_arm = (RoadNode*)memSlow(sizeof(RoadNode) * ARM_MAX);
     memset(&s_junc, 0, sizeof(s_junc)); memset(&s_sign, 0, sizeof(s_sign)); memset(&s_store, 0, sizeof(s_store));
@@ -1179,6 +1326,7 @@ void terrainUpdate(float carX, float carZ, float carYaw, float speed, float dt) 
         float dx = carX - s_mmSign.x, dz = carZ - s_mmSign.z;
         if (dx * dx + dz * dz > 900.f * 900.f) { s_mmSign.active = false; s_storePending = false; }
     }
+    deckLaterStep();                                      // a deck waiting for the car to be clear of it
     deckFind();                                           // the trestle deck under or near the car, if any
     // ---- caches ----
     float nx, nz, fx, fz;
@@ -1225,7 +1373,9 @@ void terrainGround(float x, float z, Ground& o) {
         const Cell& n = (fx < 0.5f) ? (fz < 0.5f ? a : c) : (fz < 0.5f ? b : d);
         o.mat = n.mat & 15; o.surf = n.mat >> 4;
         o.half = (o.mat == MAT_ROAD || o.mat == MAT_SHOULDER) ? n.extra * 0.05f : 3.4f;
-        o.water = o.mat == MAT_WATER ? n.extra * 0.05f : 0.f;
+        // the water's depth here: the lake's level (one flat level per lake) over the blended bed, so it never jumps
+        // from cell to cell at a shoreline
+        o.water = o.mat == MAT_WATER ? fmaxf(0.f, n.h * 0.1f - o.h) : 0.f;
         o.along = 0.f;
         o.cached = true;
         // (o.h is already the bed)
@@ -1250,6 +1400,7 @@ float terrainHeight(float x, float z) { Ground g; terrainGround(x, z, g); return
 // ---- trestle decks: the one nearest the car is kept as a run of road nodes; the wheels ride it when up at its level
 struct DeckSpan { bool on, arm; int lo, hi; };
 static DeckSpan s_deck = {false, false, 0, 0};
+static void deckClear() { s_deck.on = false; }
 static bool deckRun(bool arm, int c, int n);
 static void deckFind() {
     s_deck.on = false;
@@ -1276,16 +1427,22 @@ static bool deckRun(bool arm, int c, int n) {
     return false;
 }
 static bool deckAt(float x, float z, float& y, float& gx, float& gz, float& across, float& half, uint8_t& surf) {
+    int bi = -1; float bd = 1e30f, bt = 0.f;                     // the nearest segment of the deck (not the first in reach)
     for (int i = s_deck.lo; i < s_deck.hi; i++) {
-        const RoadNode& a = pnode(s_deck.arm, i);
-        const RoadNode& b = pnode(s_deck.arm, i + 1);
-        float t; float d2 = segProject(a, b, x, z, t);
+        float t; float d2 = segProject(pnode(s_deck.arm, i), pnode(s_deck.arm, i + 1), x, z, t);
+        if (d2 < bd) { bd = d2; bi = i; bt = t; }
+    }
+    if (bi < 0) return false;
+    {
+        const RoadNode& a = pnode(s_deck.arm, bi);
+        const RoadNode& b = pnode(s_deck.arm, bi + 1);
+        const float t = bt;
         float hf = (a.half20 + (b.half20 - a.half20) * t) * 0.05f;
-        if (d2 > sq(hf + 0.3f)) continue;
+        if (bd > sq(hf + 1.3f)) return false;                     // the deck is as wide as the road and its shoulders
         float px = a.x + (b.x - a.x) * t, pz = a.z + (b.z - a.z) * t;
         float yaw = atan2f(b.z - a.z, b.x - a.x);
         float ac = -(x - px) * sinf(yaw) + (z - pz) * cosf(yaw);
-        y = cutH(0.f, fabsf(ac), hf, a.y + (b.y - a.y) * t, a.surf == SURF_TARMAC, 0.f);   // the road's own crown: no step on or off
+        y = cutH(0.f, fminf(fabsf(ac), hf), hf, a.y + (b.y - a.y) * t, a.surf == SURF_TARMAC, 0.f);   // the road's own crown; flat out to the rails
         float gr = (b.y - a.y) / ROAD_DS;
         gx = cosf(yaw) * gr; gz = sinf(yaw) * gr;
         across = ac; half = hf; surf = a.surf;

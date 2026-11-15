@@ -11,11 +11,13 @@ struct Progress {
     uint8_t owned;                 // bit per vehicle
     uint8_t current;
     uint8_t view;
+    uint8_t radio;                 // the radio: bits 0-1 station, 2-4 volume (0: the default), bit 7 set once saved
     float miles[V_COUNT];          // lifetime odometer per vehicle
     float wallet[V_COUNT];         // unspent miles per vehicle
     uint16_t visited;              // biomes seen (bit per biome)
     bool offroadUnlocked, offroadOn;
 };
+static_assert(sizeof(Progress) == 40, "the save's size: the radio byte sits in what was padding, old saves still load");
 extern Progress g_prog;
 
 void progressInit();               // loads (or starts fresh: the STI)

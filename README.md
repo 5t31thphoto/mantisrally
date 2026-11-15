@@ -18,7 +18,15 @@ ahead and forgotten behind: coherent, never stored.
 | Touch the picture | Use what's in front of you (the dealership) |
 | **Double-tap the picture** | Stuck? Back on the road |
 | Hold the picture 1.5 s | Mute / unmute |
+| **Swipe left / right** on the picture | Radio: tune the dial (OFF, 88.7, 96.1, 101.5) |
+| **Swipe up / down** on the picture | Radio volume |
 | Bike in the air | Tip forward / back to pitch the bike for the landing |
+
+**Radio**: three stations of never-ending procedural music: 88.7 LO-FI MANTIS (lo-fi hip-hop), 96.1 THE ODD METER
+(math rock), and 101.5 BACKROADS (country and folk). Every station keeps playing while you're tuned elsewhere, so you land
+mid-song when you come back. Between songs come the DJ and the Mantis Motors ads, recorded with `tools/radio/radio_studio.py`
+and read from `/radio/radio.bin` on the SD card. Without the file, each station plays a short musical ident. The radio
+stops in photo mode and at the dealership. The station and volume are saved with your progress.
 
 **Photo mode** (stopped, press A): the screen is a viewfinder. Tilt and tip turn and tilt the camera. **A** takes the
 photo and moves to the next angle, **C** changes the angle, **B** goes back to driving. Angles: the car's side (your

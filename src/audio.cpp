@@ -2,6 +2,7 @@
 #include "audio_int.h"
 #include "scene.h"
 #include "journey.h"
+#include "radio.h"
 #include <string.h>
 #include <math.h>
 #ifndef HOST
@@ -108,6 +109,7 @@ void audioRender(int16_t* out, int n) {
         s_bus.dly[i] += s_nb.dly[i];
     }
     engineBlock(s_bus, n);
+    radioBlock(s_bus.dry, s_bus.rev, n);         // the car radio, in the cabin with you; nothing at all while it's off
     const Scene& sc = g_scene;
     s_dly.target = AUDIO_SR * 0.21f;
     s_rev.fb = 0.6f + 0.1f * dsp::clampf(sc.fog, 0.f, 1.f) + (sc.biomeA == B_CANYON || sc.biomeA == B_DEVILS ? 0.1f : 0.f);
@@ -170,6 +172,7 @@ void audioBegin() {
     g_car.rpm = 900.f;
     natureInit();
     engineInit();
+    radioInit();
 #ifndef HOST
     s_running = xTaskCreatePinnedToCore(audioTask, "audio", 6144, nullptr, 4, nullptr, 0) == pdPASS;
 #else

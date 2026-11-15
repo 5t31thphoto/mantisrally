@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <M5Unified.h>
 #include "helm.h"
+#include "radio.h"
 #include "universe.h"
 #include "journey.h"
 #include "terrain.h"
@@ -85,6 +86,11 @@ void setup() {
 #endif
     storageInit();                               // the SD card (shares the LCD's bus: after the display)
     progressInit();
+    radioLoadClips();                            // the DJ and the ads, from the card into PSRAM (never read during play)
+    if ((g_prog.radio & 0x80) && !(g_prog.radio & 0x60)) {   // the radio as you left it
+        radioSetStation(g_prog.radio & 3);
+        int v = (g_prog.radio >> 2) & 7; radioSetVolume(v ? v : 4);
+    }
     g_prog.view = VIEW_COCKPIT;                  // you always start in the driver's seat
     universeInit(seed);
     journeyInit(seed);
@@ -121,6 +127,7 @@ void loop() {
     HelmEvents ev;
     helmUpdate(dt, ev);
     if (ev.mute) { audioSetMuted(!audioMuted()); hx::confirmMute(audioMuted()); }
+    radioSetPaused(storeActive() || photoActive());                  // the radio stops in there (the stations play on)
 
     // ---------------- the dealership ----------------
     if (storeActive()) {
@@ -158,6 +165,23 @@ void loop() {
         message("BACK ON THE ROAD", nullptr, 1.5f); sfxUi(UI_WARN);
     }
     if (ev.view) { g_prog.view = (uint8_t)((g_prog.view + 1) % VIEW_N); sfxUi(UI_TICK); }
+    if (ev.swipeX || ev.swipeY) {                                   // the radio: swipe across to tune, up / down for volume
+        uint8_t st = radioStation();
+        if (ev.swipeX) {
+            st = (uint8_t)((st + (ev.swipeX > 0 ? 1 : RADIO_N - 1)) % RADIO_N);
+            radioSetStation(st);
+            message(radioFreq(st), radioName(st), 2.f);
+        } else {
+            radioSetVolume(radioVolume() + ev.swipeY);
+            static char bar[12];
+            int v = radioVolume();
+            for (int i = 0; i < RADIO_VOL_MAX; i++) bar[i] = i < v ? '#' : '-';
+            bar[RADIO_VOL_MAX] = 0;
+            message(st == RADIO_OFF ? "RADIO OFF" : "VOLUME", bar, 1.5f);
+        }
+        sfxUi(UI_TICK);
+        g_prog.radio = (uint8_t)(0x80 | (radioStation() & 3) | ((radioVolume() & 7) << 2));   // saved with the next save
+    }
     if (ev.recenter) { sfxUi(UI_OK); hx::pop(0.3f, 0.04f); }
     if (ev.horn) { sfxHorn(); fieldHorn(car.x, car.z); hx::horn(); }
 

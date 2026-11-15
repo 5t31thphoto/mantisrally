@@ -7,6 +7,8 @@
 //   C (right button)   handbrake (hold)  in the air on the bike: tip forward / back to pitch the bike
 //   touch the screen   use what's in front of you (the dealership)        hold the screen 1.5 s  mute
 //   double-tap the screen   stuck? back on the road
+//   swipe left / right across the screen   the radio dial (off, and the three stations)
+//   swipe up / down                        the radio's volume
 // The A/B/C buttons are zones of the touch panel below the picture: touches there are buttons only, never taps
 // or the mute hold.
 
@@ -16,6 +18,7 @@ struct HelmEvents {
     bool horn, view, recenter, mute, cPress;
     bool tap; int tapX, tapY;      // panel pixels (320x240)
     bool doubleTap;                // two deliberate taps in quick succession
+    int8_t swipeX, swipeY;         // a quick deliberate swipe: +1 right / -1 left, +1 up / -1 down
 };
 
 void  helmInit();

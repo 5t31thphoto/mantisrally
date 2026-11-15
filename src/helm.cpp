@@ -20,6 +20,8 @@ constexpr uint32_t HOLD_B_MS    = 650;
 constexpr uint32_t MUTE_HOLD_MS = 1500;
 constexpr uint32_t TAP_MS       = 400;
 constexpr uint32_t DOUBLE_MS    = 700;     // first tap's release to the second's release (a real double tap)
+constexpr uint32_t SWIPE_MS     = 700;     // a swipe is quick...
+constexpr int SWIPE_X = 70, SWIPE_Y = 60;  // ...and long (panel pixels), and mostly one way (twice the other)
 // ======================================================
 
 static float s_steer = 0.f, s_tip = 0.f;
@@ -30,7 +32,7 @@ static bool s_hb = false;
 static uint32_t s_bDown = 0; static bool s_bWas = false, s_bHeld = false;
 static bool s_aWas = false;
 static bool s_touch = false, s_moved = false, s_muteFired = false;
-static int s_tx0 = 0, s_ty0 = 0; static uint32_t s_tt0 = 0;
+static int s_tx0 = 0, s_ty0 = 0, s_tx1 = 0, s_ty1 = 0; static uint32_t s_tt0 = 0;
 static uint32_t s_lastTap = 0; static int s_ltx = 0, s_lty = 0;
 
 static inline float clampf(float v, float a, float b) { return v < a ? a : (v > b ? b : v); }
@@ -90,8 +92,9 @@ void helmUpdate(float dt, HelmEvents& ev) {
     // ---- touch: the picture only (the button strip below it is A/B/C) ----
     auto t = M5.Touch.getDetail();
     bool down = t.isPressed() && t.y < 236 && !(a || b || c);
-    if (down && !s_touch) { s_touch = true; s_moved = false; s_muteFired = false; s_tx0 = t.x; s_ty0 = t.y; s_tt0 = now; }
+    if (down && !s_touch) { s_touch = true; s_moved = false; s_muteFired = false; s_tx0 = t.x; s_ty0 = t.y; s_tt0 = now; s_tx1 = t.x; s_ty1 = t.y; }
     else if (down && s_touch) {
+        s_tx1 = t.x; s_ty1 = t.y;
         if (abs(t.x - s_tx0) + abs(t.y - s_ty0) > 24) s_moved = true;      // a finger jitters in a moving car
         if (!s_moved && !s_muteFired && now - s_tt0 > MUTE_HOLD_MS) { s_muteFired = true; ev.mute = true; }
     } else if (!down && s_touch) {
@@ -99,6 +102,10 @@ void helmUpdate(float dt, HelmEvents& ev) {
             ev.tap = true; ev.tapX = s_tx0; ev.tapY = s_ty0;
             if (s_lastTap && now - s_lastTap < DOUBLE_MS && abs(s_tx0 - s_ltx) + abs(s_ty0 - s_lty) < 100) { ev.doubleTap = true; s_lastTap = 0; }
             else { s_lastTap = now; s_ltx = s_tx0; s_lty = s_ty0; }
+        } else if (s_moved && !s_muteFired && now - s_tt0 < SWIPE_MS) {
+            int dx = s_tx1 - s_tx0, dy = s_ty1 - s_ty0;
+            if (abs(dx) >= SWIPE_X && abs(dx) > 2 * abs(dy)) ev.swipeX = (int8_t)(dx > 0 ? 1 : -1);
+            else if (abs(dy) >= SWIPE_Y && abs(dy) > 2 * abs(dx)) ev.swipeY = (int8_t)(dy < 0 ? 1 : -1);
         }
         s_touch = false;
     }

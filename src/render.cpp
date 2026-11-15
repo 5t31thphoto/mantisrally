@@ -82,6 +82,14 @@ static uint8_t* s_wheelMask = nullptr;     // cockpit pixels that are the steeri
 static uint8_t s_wheelBg = 0;              // the dash behind the wheel (drawn first, so nothing old shows through)
 static float s_wheelK = 1.f;               // the wheel's ellipse (width / height, drawn in perspective)
 static int s_wheelR = 0;                   // how far the wheel's pixels reach from its centre
+static float s_wcx = 0.f, s_wcy = 0.f;     // the wheel's centre (to the half pixel: what it turns about)
+// Wheels measured off the art by hand (zeros: found from the drawing at load, as before):
+//   the rim: centre x, y, outer half-width, half-height;  the spokes: the row the side spokes run along, their
+//   half-thickness;  the hub: centre x, y, radius.
+// The Stingray's wheel is drawn from the sheet at one even scale (tools/sprites/make_cockpits.py, VETTE_WHEEL): these
+// are the same measurements on the screen (pixel indices), so it turns about its own centre as the round wheel it is.
+struct WheelFit { float cx, cy, rx, ry, spokeY, spokeH, hubX, hubY, hubR; };
+static const WheelFit WHEEL_FIT[V_COUNT] = {{0}, {0}, {44.83f, 97.62f, 21.44f, 21.88f, 97.55f, 3.0f, 44.70f, 98.70f, 5.2f}, {0}};
 static uint8_t s_glassLow[FB_W];           // per column: the lowest row of glass (behind the wheel above it: the world)
 static float s_bob = 0.f;
 
@@ -1257,7 +1265,7 @@ static inline int timberShade(float nx, float nz) {  // a vertical timber face l
 }
 static void drawDeckSeg(const RoadNode& a, const RoadNode& b) {
     if (!roughlyInView(a.x, a.z, 320.f) && !roughlyInView(b.x, b.z, 320.f)) return;
-    const float ha = a.half20 * 0.05f + 0.3f, hb = b.half20 * 0.05f + 0.3f;
+    const float ha = a.half20 * 0.05f + 1.3f, hb = b.half20 * 0.05f + 1.3f;   // the road and its shoulders: what the wheels ride
     const float pax = -sinf(a.yaw), paz = cosf(a.yaw), pbx = -sinf(b.yaw), pbz = cosf(b.yaw);
     const float ya = a.y + 0.13f, yb = b.y + 0.13f;                  // just above the road's crown at the abutments
     CV top[4] = { camPt(a.x + pax * ha, ya, a.z + paz * ha, a.s), camPt(b.x + pbx * hb, yb, b.z + pbz * hb, b.s),
@@ -1278,7 +1286,7 @@ static void drawBent(const RoadNode& n) {              // the trestle's legs at 
     const float top = n.y + 0.05f - 0.7f;
     float lx[2], lz[2], gy[2];
     for (int e = 0; e < 2; e++) {
-        float o = (e ? -1.f : 1.f) * (hf - 0.2f);
+        float o = (e ? -1.f : 1.f) * (hf + 0.9f);                   // under the deck's edges
         lx[e] = n.x + px * o; lz[e] = n.z + pz * o;
         gy[e] = terrainHeight(lx[e], lz[e]);           // the land, or the road under the deck
     }
@@ -1305,7 +1313,7 @@ static inline void putFog(int x, int y, uint8_t c, uint8_t zc, float dep) {
 // the yellow caution triangle, point up on a post, black outline; retroreflective: it lights up in the headlights
 static void drawCaution(const RoadNode& n, int side) {
     const float hf = n.half20 * 0.05f;
-    float wx = n.x - sinf(n.yaw) * side * (hf + 1.9f), wz = n.z + cosf(n.yaw) * side * (hf + 1.9f);
+    float wx = n.x - sinf(n.yaw) * side * (hf + 2.2f), wz = n.z + cosf(n.yaw) * side * (hf + 2.2f);
     if (!roughlyInView(wx, wz, 165.f)) return;
     float gy = terrainHeight(wx, wz);
     float sx, sy, d;
@@ -1657,13 +1665,14 @@ MR_HOT static void drawCockpit() {
         float ca = cosf(s_wheelAng), sa = sinf(s_wheelAng);
         int R = s_wheelR > 0 ? s_wheelR : c.wr + 2;                // the whole reach of the wheel's pixels
         // the dash behind the wheel first: where the turned wheel isn't, the dash shows, never last frame
-        for (int y = c.wy - R; y <= c.wy + R; y++) for (int x = c.wx - R; x <= c.wx + R; x++)
+        const int cxI = (int)s_wcx, cyI = (int)s_wcy;
+        for (int y = cyI - R; y <= cyI + R + 1; y++) for (int x = cxI - R; x <= cxI + R + 1; x++)
             if ((unsigned)x < (unsigned)W && (unsigned)y < (unsigned)H && s_wheelMask[y * W + x] && y > s_glassLow[x]) fb[y * W + x] = s_wheelBg;
-        for (int y = c.wy - R; y <= c.wy + R; y++) for (int x = c.wx - R; x <= c.wx + R; x++) {
+        for (int y = cyI - R; y <= cyI + R + 1; y++) for (int x = cxI - R; x <= cxI + R + 1; x++) {
             if ((unsigned)x >= (unsigned)W || (unsigned)y >= (unsigned)H) continue;
             // turn it as the round wheel it is (the drawing is an ellipse): stretch to a circle, rotate, squash back
-            float dx = x - c.wx, dy = (y - c.wy) * s_wheelK;
-            int sx = (int)lroundf(c.wx + dx * ca + dy * sa), sy = (int)lroundf(c.wy + (-dx * sa + dy * ca) / s_wheelK);
+            float dx = (float)x - s_wcx, dy = ((float)y - s_wcy) * s_wheelK;
+            int sx = (int)lroundf(s_wcx + dx * ca + dy * sa), sy = (int)lroundf(s_wcy + (-dx * sa + dy * ca) / s_wheelK);
             if ((unsigned)sx >= (unsigned)W || (unsigned)sy >= (unsigned)H) continue;
             int si = sy * W + sx;
             if (s_wheelMask[si]) fb[y * W + x] = (uint8_t)(P_COCK + s_cock[si]);
@@ -1844,16 +1853,28 @@ void renderSetVehicle(uint8_t veh) {
         for (int x = c.wx + c.wr + 3; x >= c.wx; x--) if (x < W && lumAt(x, c.wy) < 80.f) { xr = x; break; }
         for (int y = c.wy - c.wr - 3; y <= c.wy; y++) if (y >= 0 && lumAt(c.wx, y) < 80.f) { yt = y; break; }
         float rx = (xr - xl) * 0.5f, ry = (float)(c.wy - yt);
+        s_wcx = (float)c.wx; s_wcy = (float)c.wy;
+        const WheelFit& fit = WHEEL_FIT[s_veh];
+        const bool fitted = fit.rx > 0.f;
+        if (fitted) { s_wcx = fit.cx; s_wcy = fit.cy; rx = fit.rx; ry = fit.ry; }
         s_wheelK = (rx > 4.f && ry > 4.f) ? clampf(rx / ry, 0.8f, 2.f) : 1.f;
         float R = rx > 4.f ? rx : (float)c.wr;
         int cnt[16] = {0};
-        for (int y = c.wy - c.wr - 4; y <= c.wy + c.wr + 4; y++) for (int x = c.wx - c.wr - 4; x <= c.wx + c.wr + 4; x++) {
+        for (int y = c.wy - c.wr - 4; y <= c.wy + c.wr + 8; y++) for (int x = c.wx - c.wr - 4; x <= c.wx + c.wr + 4; x++) {
             if ((unsigned)x >= (unsigned)W || (unsigned)y >= (unsigned)H || !s_cock[y * W + x]) continue;
-            float dx = (float)(x - c.wx), dy = (y - c.wy) * s_wheelK;
+            float dx = (float)x - s_wcx, dy = ((float)y - s_wcy) * s_wheelK;
             float d = sqrtf(dx * dx + dy * dy) / R;
-            bool rim = d > 0.80f && d < 1.12f && lumAt(x, y) < 90.f;     // the rim is the dark ring, not whatever is beside it
-            bool hub = d < 0.30f;
-            bool spoke = d >= 0.30f && d <= 0.85f && ((fabsf(dy) < 2.2f) || (dy > 0.f && fabsf(dx) < 2.2f));
+            bool rim, hub, spoke;
+            if (fitted) {                                                 // the whole drawn wheel: rim and its outline, spokes, hub
+                rim = d > 0.76f && d < 1.10f;
+                float hx = (float)x - fit.hubX, hy = (float)y - fit.hubY;
+                hub = hx * hx + hy * hy <= fit.hubR * fit.hubR;
+                spoke = d <= 0.80f && ((fabsf((float)y - fit.spokeY) <= fit.spokeH) || ((float)y > fit.hubY && fabsf(hx) <= fit.spokeH));
+            } else {
+                rim = d > 0.80f && d < 1.12f && lumAt(x, y) < 90.f;     // the rim is the dark ring, not whatever is beside it
+                hub = d < 0.30f;
+                spoke = d >= 0.30f && d <= 0.85f && ((fabsf(dy) < 2.2f) || (dy > 0.f && fabsf(dx) < 2.2f));
+            }
             if (rim || hub || spoke) s_wheelMask[y * W + x] = 1;
             else if (d > 1.15f && d < 1.5f && y > s_glassLow[x]) cnt[s_cock[y * W + x]]++;   // the dash around the wheel
         }
