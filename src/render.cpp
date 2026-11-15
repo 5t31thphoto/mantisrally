@@ -2096,9 +2096,11 @@ void renderSetVehicle(uint8_t veh) {
 void renderInit() {
     if (!zb) zb = (uint8_t*)memFast(W * H);
 #ifndef HOST
-    if (!s_tWorker) {   // the terrain's second core: priority 4 (the sound's: they share core 0 a tick at a time), below the screen
+    if (!s_tWorker) {   // the terrain's second core: priority 3, below the sound (4), the speaker driver (5) and the screen
+        // (6): the sound takes core 0 the moment it has work, the terrain only what is left. (At the sound's own priority
+        // the two shared the core a tick at a time and the sound fell behind every frame: choppy audio.)
         s_tDone = xSemaphoreCreateBinary();
-        if (!s_tDone || xTaskCreatePinnedToCore(terrainWorker, "terrain", 3072, nullptr, 4, &s_tWorker, 0) != pdPASS) s_tWorker = nullptr;
+        if (!s_tDone || xTaskCreatePinnedToCore(terrainWorker, "terrain", 3072, nullptr, 3, &s_tWorker, 0) != pdPASS) s_tWorker = nullptr;
     }
 #endif
     if (!s_gpat) s_gpat = (uint8_t*)memSlow(W * H);
