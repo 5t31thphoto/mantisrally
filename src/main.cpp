@@ -120,7 +120,8 @@ void loop() {
     uint32_t now = millis();
     float dt = lastMs ? (now - lastMs) * 0.001f : 1.f / 30.f;
     lastMs = now;
-    if (dt > 0.05f) dt = 0.05f;
+    if (dt > 0.1f) dt = 0.1f;                    // a stall (a save): the world waits rather than leaps. Below that it keeps
+                                                 // real time: the physics takes a slow frame in steps of at most 50 ms
     t += dt;
     fpsAvg += (1.f / fmaxf(dt, 0.001f) - fpsAvg) * 0.05f;
 
@@ -144,6 +145,7 @@ void loop() {
         else {
             if (ev.cPress) { photoNextAngle(); sfxUi(UI_TICK); }    // C: the next angle
             photoUpdate(dt, helmSteer(), helmTip());
+            terrainSetSun(g_scene.sunAz, g_scene.sunElev);
             terrainUpdate(car.x, car.z, car.yaw, 0.f, dt);
             sceneUpdate(t, dt, car.x, car.z, car.yaw, 0.f, distance);
             fieldUpdate(car, veh, dt);
@@ -193,8 +195,14 @@ void loop() {
     // launch control (the STI's trick): brake + throttle at a standstill holds it on the boil
     if (veh == V_STI && car.speed < 0.5f && in.brake > 0.2f && helmThrottle() > 0.f) in.throttle = 0.f;
     float px = car.x, pz = car.z;
-    vehicleStep(car, veh, in, dt);
-    FieldHit hit = fieldCollide(car, veh);
+    FieldHit hit = {0.f, HIT_NONE};
+    {   const int nSub = dt > 0.05f ? 2 : 1;                         // (dt <= 0.1: steps of at most 50 ms, as always)
+        for (int k = 0; k < nSub; k++) {
+            vehicleStep(car, veh, in, dt / nSub);                    // (its events keep the biggest of the steps)
+            FieldHit h = fieldCollide(car, veh);
+            if (hit.kind != HIT_DEER && (h.kind == HIT_DEER || h.strength > hit.strength)) hit = h;
+        }
+    }
     if (hit.kind == HIT_DEER) {
         sfxImpact(IMP_DEER, 1.f); hx::bump(0.6f);
         if (g_prog.view == VIEW_COCKPIT) renderDeerSplat();
@@ -237,6 +245,7 @@ void loop() {
     } else stallT = 0.f;
 
     // ---------------- the journey ----------------
+    terrainSetSun(g_scene.sunAz, g_scene.sunElev);
     terrainUpdate(car.x, car.z, car.yaw, car.u, dt);
     journeyUpdate(moved, car.yaw, onRoad);
     journeySetCar(car.x, car.z, car.yaw, moved);
@@ -273,8 +282,13 @@ void loop() {
             bool armLeft = roadJunctionArmSide() < 0;                 // the sides as you see them at the split
             uint8_t dl = armLeft ? j->destArm : j->destMain, dr = armLeft ? j->destMain : j->destArm;
             float ml = armLeft ? j->milesArm : j->milesMain, mr = armLeft ? j->milesMain : j->milesArm;
-            snprintf(juncL, sizeof juncL, "<%s %.0f", biome(dl).sign, ml);
-            snprintf(juncR, sizeof juncR, "%s %.0f>", biome(dr).sign, mr);
+            // formatted again only when the text would change: the same signs, and the same whole miles as "%.0f"
+            // prints them (nearest, ties to even, and the sign of a "-0")
+            static int kL = -1, kR = -1; static long mL = 0, mR = 0; static bool nL = false, nR = false;
+            long rl = lrintf(ml), rr = lrintf(mr);
+            bool sl = __builtin_signbit(ml) != 0, sr = __builtin_signbit(mr) != 0;
+            if (dl != kL || rl != mL || sl != nL) { snprintf(juncL, sizeof juncL, "<%s %.0f", biome(dl).sign, ml); kL = dl; mL = rl; nL = sl; }
+            if (dr != kR || rr != mR || sr != nR) { snprintf(juncR, sizeof juncR, "%s %.0f>", biome(dr).sign, mr); kR = dr; mR = rr; nR = sr; }
         }
     }
     // the dealership: ask for one when you can afford the next car; pull in and stop to shop
@@ -318,7 +332,6 @@ void loop() {
 
     // ---------------- picture ----------------
     ViewInfo& v = g_view;
-    Ground g; terrainGround(car.x, car.z, g);
     v.view = g_prog.view; v.vehicle = veh;
     v.x = car.x; v.y = car.y; v.z = car.z; v.yaw = car.yaw;
     v.groundY = car.y - V.rideHeight;
@@ -333,7 +346,6 @@ void loop() {
     v.juncL = juncL; v.juncR = juncR; v.juncA = juncA; v.storeA = storeA;
     v.showFps = false; v.fps = (int)fpsAvg;
     if (msgT > 0.f) msgT -= dt;
-    (void)g;
     renderFrame();
     { bool deerWipe; if (renderWipeEvent(deerWipe)) sfxImpact(deerWipe ? IMP_WIPE_DEER : IMP_WIPE, 1.f); }
     displayPresent();

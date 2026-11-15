@@ -152,6 +152,7 @@ void audioSpeakerBegin() {
     if (M5.Speaker.isEnabled()) M5.Speaker.end();
     auto sc = M5.Speaker.config();
     sc.task_priority = 5;
+    sc.task_pinned_core = 0;                     // the sound core: unpinned (M5's default), it could run on the drawing core
     sc.dma_buf_len = 256;
     sc.dma_buf_count = 16;
     M5.Speaker.config(sc);

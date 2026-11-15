@@ -56,12 +56,15 @@ struct Grid {
     int jobAxis, jobLine, jobPos;   // the row / column being dreamt
     int rebake;                     // >=0: sweeping every cell again (a road appeared)
     float maxH;                     // highest cell seen (ray early-out)
+    uint8_t* sh;                    // 1 bit a cell (same order as c): out of the sun (a ridge between it and the sun)
+    int shCur;                      // the next cell the slow sweep re-checks
 };
 
 void terrainInit(uint32_t seed);
 // Each frame: extends / drops road, handles junction decisions, scrolls the caches (budgeted).
 void terrainUpdate(float carX, float carZ, float carYaw, float speed, float dt);
 void terrainRebuild();                       // re-dream everything now (start, teleports, previews)
+void terrainSetSun(float az, float elev);    // each frame, before terrainUpdate: which cells the land shades from the sun
 
 // --- land ---
 float terrainNatural(float x, float z);      // height before the road is cut in

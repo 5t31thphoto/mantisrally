@@ -6,6 +6,7 @@
 #include "mem.h"
 #ifndef HOST
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 #endif
 
 namespace mantis {
@@ -47,11 +48,11 @@ bool overlayEnabled() { return s_ovOn; }
 
 void compositeRow(int y, uint16_t* out) {
     const uint8_t* fb = frameBuffer();
-    const uint16_t* pal = framePalette565();
+    const uint16_t* pal = framePalette565() + (((y + frameBob()) & 1) << 9);   // this row's two dither positions
     int src = (y + frameBob()) >> 1;
     if (src > FB_H - 1) src = FB_H - 1;
     const uint8_t* srow = fb + src * FB_W;
-    for (int x = 0; x < DW; x++) out[x] = swap16(pal[srow[x >> 1]]);
+    for (int x = 0; x < DW; x++) out[x] = swap16(pal[((x & 1) << 8) + srow[x >> 1]]);
     if (s_ovOn && s_ovRow[y]) { const uint16_t* o = s_ov + y * DW; for (int x = 0; x < DW; x++) if (o[x]) out[x] = o[x]; }
 }
 
@@ -62,19 +63,40 @@ void compositeRow(int y, uint16_t* out) {
 // the bob offset and the overlay row flags into a packet in fast internal RAM (~0.1 ms) and goes straight back
 // to drawing. The screen core doubles the packet 16 rows at a time (pixel pairs as single 32-bit writes) into two
 // strip buffers in DMA-capable internal RAM, and DMAs each strip to the LCD in its own byte order while it fills
-// the other, with the bus held for the whole frame. The LCD clock is 80 MHz (MP_LCD_MHZ). Nothing passes through
-// PSRAM; the doubling costs the drawing core nothing and hides behind the transfer on the screen core.
+// the other, with the bus held for the whole frame. The LCD clock is MP_LCD_MHZ. Nothing passes through PSRAM; the
+// doubling costs the drawing core nothing and hides behind the transfer on the screen core.
+// The screen task outranks the sound on that core, so a strip is queued the moment the last one is done (the sound
+// renders a 21 ms block in one go: below it, the transfer stalled behind every block). While a strip is on the wire
+// the task sleeps on a microsecond timer set for the strip's end, so the sound has the core.
 //
 // -DMP_LEGACY_DISPLAY restores the previous pipeline exactly (whole-frame PSRAM canvases).
 // Both produce byte-identical pixels (tools/host/displaytest.cpp checks this on every golden scene).
 // ---------------------------------------------------------------------------------------------------------
 static constexpr int STRIP = 16;
-struct Packet { uint8_t fb[FB_W * FB_H]; uint16_t pal[256]; int bob; bool ovOn; uint8_t ovRow[DH]; };
+struct Packet { uint8_t fb[FB_W * FB_H]; uint16_t pal[4 * 256]; int bob; bool ovOn; uint8_t ovRow[DH]; };   // pal: 2x2 dither
 static Packet* s_pk = nullptr;
 static uint16_t* s_strip[2] = {nullptr, nullptr};    // two 320 x 16 strips in DMA-capable internal RAM
 static bool s_stream = false;
 #ifndef MP_LCD_MHZ
 #define MP_LCD_MHZ 80                                // the LCD write clock: 80 MHz is the Core2's proven fast setting; -DMP_LCD_MHZ=40 for the stock clock
+#endif
+static constexpr int64_t STRIP_US = (int64_t)DW * STRIP * 16 / MP_LCD_MHZ;   // one strip on the wire (2048 us at 40 MHz)
+static constexpr int64_t STRIP_EARLY_US = 30;        // wake this much before the strip's end (the timer's dispatch)
+static constexpr int64_t STRIP_MIN_SLEEP_US = 80;    // less than this left: just wait it out
+#ifndef HOST
+static esp_timer_handle_t s_stripTimer = nullptr;
+static SemaphoreHandle_t s_stripDone = nullptr;
+static int64_t s_dmaEnd = 0;                         // when the strip on the wire is done (esp_timer clock)
+static void stripTimerCb(void*) { xSemaphoreGive(s_stripDone); }
+// Until the strip on the wire is done: asleep for nearly all of it (the core is the sound's), then the last few us.
+static void stripWait() {
+    if (s_stripTimer) {
+        int64_t left = s_dmaEnd - esp_timer_get_time() - STRIP_EARLY_US;
+        if (left > STRIP_MIN_SLEEP_US && esp_timer_start_once(s_stripTimer, (uint64_t)left) == ESP_OK)
+            xSemaphoreTake(s_stripDone, portMAX_DELAY);
+    }
+    M5.Display.waitDMA();
+}
 #endif
 
 static uint16_t* stripAlloc() {
@@ -85,16 +107,17 @@ static uint16_t* stripAlloc() {
 #endif
 }
 
-// One screen row from a frame: the shared doubling (stream, legacy and compositeRow all agree on these pixels).
+// One screen row from a frame: the shared doubling (stream, legacy and compositeRow all agree on these pixels). Each
+// picture pixel is a 2x2 block on the panel; each position in it takes its own dithered copy of the palette.
 static inline void doubleRow(const uint8_t* fb, const uint16_t* pal, int bob, bool ovOn, const uint8_t* ovRow, int y, uint16_t* d) {
     int src = (y + bob) >> 1;
     if (src > FB_H - 1) src = FB_H - 1;
     const uint8_t* s = fb + src * FB_W;
+    const uint16_t* pa = pal + (((y + bob) & 1) << 9), *pb = pa + 256;
     uint32_t* d32 = (uint32_t*)d;
-    for (int x = 0; x < FB_W; x++) { uint32_t v = pal[s[x]]; d32[x] = v | (v << 16); }   // two identical pixels at once
+    for (int x = 0; x < FB_W; x++) { const int c = s[x]; d32[x] = (uint32_t)pa[c] | ((uint32_t)pb[c] << 16); }   // both pixels at once
     if (ovOn && ovRow[y]) { const uint16_t* o = s_ov + y * DW; for (int x = 0; x < DW; x++) if (o[x]) d[x] = swap16(o[x]); }
 }
-static inline int srcRow(int y, int bob) { int src = (y + bob) >> 1; return src > FB_H - 1 ? FB_H - 1 : src; }
 
 // The strips of one packet, written by `emit(stripTopY, rows, pixels)`.
 template <class Emit> static void streamPacket(const Packet& P, uint16_t* const* strips, Emit emit) {
@@ -103,10 +126,7 @@ template <class Emit> static void streamPacket(const Packet& P, uint16_t* const*
         if (!d) return;
         for (int r = 0; r < STRIP; r++) {
             int y = y0 + r;
-            uint16_t* row = d + r * DW;
-            bool ov = P.ovOn && P.ovRow[y];
-            if (r > 0 && !ov && !(P.ovOn && P.ovRow[y - 1]) && srcRow(y, P.bob) == srcRow(y - 1, P.bob)) { memcpy(row, row - DW, DW * sizeof(uint16_t)); continue; }
-            doubleRow(P.fb, P.pal, P.bob, P.ovOn, P.ovRow, y, row);
+            doubleRow(P.fb, P.pal, P.bob, P.ovOn, P.ovRow, y, d + r * DW);   // (rows of a pair differ: their own dither)
         }
         emit(y0, d);
     }
@@ -123,13 +143,13 @@ static void fillPacket() {
 // Wait until the screen core has finished with the current packet (and the overlay it reads).
 static void displayWaitIdle() {
 #ifndef HOST
-    if (s_dispIdle) { while (xSemaphoreTake(s_dispIdle, 0) != pdTRUE) vTaskDelay(1); xSemaphoreGive(s_dispIdle); }
+    if (s_dispIdle) { xSemaphoreTake(s_dispIdle, portMAX_DELAY); xSemaphoreGive(s_dispIdle); }   // woken the moment it's done
 #endif
 }
 
 void displayHoldBus() {
 #ifndef HOST
-    if (s_dispIdle) while (xSemaphoreTake(s_dispIdle, 0) != pdTRUE) vTaskDelay(1);
+    if (s_dispIdle) xSemaphoreTake(s_dispIdle, portMAX_DELAY);
 #endif
 }
 void displayReleaseBus() {
@@ -155,10 +175,11 @@ static void displayTask(void*) {
 #ifndef HOST
         M5.Display.startWrite();
         streamPacket(*s_pk, s_strip, [](int y0, uint16_t* d) {
-            M5.Display.waitDMA();                                   // the strip before last is done with this buffer's twin
+            stripWait();                                            // the strip before last is done with this buffer's twin
             M5.Display.pushImageDMA(0, y0, DW, STRIP, (const lgfx::swap565_t*)d);
+            s_dmaEnd = esp_timer_get_time() + STRIP_US;             // (it started inside the call: this is never early)
         });
-        M5.Display.waitDMA();
+        stripWait();
         M5.Display.endWrite();
 #endif
         xSemaphoreGive(s_dispIdle);
@@ -187,7 +208,17 @@ void displayInit() {
     if (s_stream) {
         s_dispIdle = xSemaphoreCreateBinary();
         xSemaphoreGive(s_dispIdle);
-        xTaskCreatePinnedToCore(displayTask, "lcd", 4096, nullptr, 2, &s_dispTask, 0);
+#ifndef HOST
+        s_stripDone = xSemaphoreCreateBinary();
+        if (s_stripDone) {                                            // no timer: the strips are waited out as before
+            esp_timer_create_args_t ta = {};
+            ta.callback = stripTimerCb;
+            ta.name = "lcdstrip";
+            if (esp_timer_create(&ta, &s_stripTimer) != ESP_OK) s_stripTimer = nullptr;
+        }
+#endif
+        // above the sound task (4) and the speaker driver (5) on core 0: it only fills strips (~0.1 ms each) and sleeps
+        xTaskCreatePinnedToCore(displayTask, "lcd", 4096, nullptr, 6, &s_dispTask, 0);
         return;
     }
     // could not get the strip buffers: fall back to the canvas pipeline below
@@ -213,19 +244,13 @@ static void expand(M5Canvas* c) {
     const uint8_t* fb = frameBuffer();
     const uint16_t* pal = framePalette565();
     const int bob = frameBob();
-    int prevSrc = -1;
     for (int y = 0; y < DH; y++) {
         int src = (y + bob) >> 1;
         if (src > FB_H - 1) src = FB_H - 1;
         uint16_t* d = dst + y * DW;
-        if (src == prevSrc) { memcpy(d, d - DW, DW * sizeof(uint16_t)); continue; }
         const uint8_t* s = fb + src * FB_W;
-        for (int x = 0; x < FB_W; x++) {
-            uint16_t v = pal[s[x]];
-            d[2 * x] = v;
-            d[2 * x + 1] = v;
-        }
-        prevSrc = src;
+        const uint16_t* pa = pal + (((y + bob) & 1) << 9), *pb = pa + 256;
+        for (int x = 0; x < FB_W; x++) { d[2 * x] = pa[s[x]]; d[2 * x + 1] = pb[s[x]]; }
     }
     if (s_ovOn) {                                       // the overlay at full resolution
         for (int y = 0; y < DH; y++) {
@@ -239,7 +264,7 @@ static void expand(M5Canvas* c) {
 
 void displayPresent() {
     if (s_stream) {
-        while (xSemaphoreTake(s_dispIdle, 0) != pdTRUE) vTaskDelay(1);   // the screen core has finished the last frame
+        xSemaphoreTake(s_dispIdle, portMAX_DELAY);                       // the screen core has finished the last frame
         fillPacket();
         xTaskNotifyGive(s_dispTask);
         return;
@@ -250,7 +275,7 @@ void displayPresent() {
         return;
     }
     // wait for the LCD to finish the previous frame
-    while (xSemaphoreTake(s_dispIdle, 0) != pdTRUE) vTaskDelay(1);
+    xSemaphoreTake(s_dispIdle, portMAX_DELAY);
     expand(s_fb[s_cur]);
     s_pushIdx = s_cur;
     xTaskNotifyGive(s_dispTask);

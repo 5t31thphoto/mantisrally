@@ -976,6 +976,45 @@ static void cellDryUp(Grid& g, Cell& o, float level) {                   // wate
 }
 static const int LAKE_DI[4] = {1, -1, 0, 0}, LAKE_DJ[4] = {0, 0, 1, -1};
 
+// ---- the land's shadows: does a ridge stand between this cell and the sun? Looked for along the sun's heading out
+// to 42 cells (105 m near, 336 m far) and kept as one bit a cell; worked out when a cell is dreamt and swept again
+// slowly as the sun moves. The renderer leaves the direct sun out of a shaded cell's light (soft edges come from its
+// usual blend of four cells).
+static float s_sunUx = 1.f, s_sunUz = 0.f, s_sunTan = 1.f;
+static bool s_sunUp = false;
+void terrainSetSun(float az, float elev) {
+    s_sunUx = cosf(az); s_sunUz = sinf(az);
+    s_sunUp = elev > 0.01f;
+    s_sunTan = tanf(elev < 1.4f ? elev : 1.4f);
+}
+static void shadowCell(Grid& g, int ci, int cj) {
+    if (!g.sh) return;
+    const int N = g.N;
+    const int k = gridWrap(cj, N) * N + gridWrap(ci, N);
+    bool shade = false;
+    if (s_sunUp) {
+        const float h0 = g.c[k].h * 0.1f + 0.5f;                 // half a metre: no shade from the cell's own grain
+        static const uint8_t D[12] = {1, 2, 3, 4, 6, 8, 11, 15, 20, 26, 33, 42};
+        for (int s = 0; s < 12; s++) {
+            int i = ci + (int)floorf(s_sunUx * D[s] + 0.5f), j = cj + (int)floorf(s_sunUz * D[s] + 0.5f);
+            if (i < g.ox || j < g.oz || i >= g.ox + N || j >= g.oz + N) break;     // past the window: open sky
+            if (g.c[gridWrap(j, N) * N + gridWrap(i, N)].h * 0.1f > h0 + D[s] * g.cell * s_sunTan) { shade = true; break; }
+        }
+    }
+    const uint8_t m = (uint8_t)(1u << (k & 7));
+    if (shade) g.sh[k >> 3] |= m; else g.sh[k >> 3] &= (uint8_t)~m;
+}
+static void shadowStep(Grid& g, int n) {                         // the slow sweep: n cells a frame, round the window
+    if (!g.c || !g.sh || !s_sunUp) return;
+    const int N = g.N, total = N * N;
+    const int wx = gridWrap(g.ox, N), wz = gridWrap(g.oz, N);
+    for (int c = 0; c < n; c++) {
+        int k = g.shCur; g.shCur = k + 1 >= total ? 0 : k + 1;
+        int sx = k % N, sz = k / N;
+        shadowCell(g, g.ox + (sx - wx + N) % N, g.oz + (sz - wz + N) % N);
+    }
+}
+
 static void bakeCell(Grid& g, int ci, int cj) {
     float x = ci * g.cell, z = cj * g.cell;
     const Land& L = journeyLand();
@@ -1113,11 +1152,15 @@ static void bakeCell(Grid& g, int ci, int cj) {
     if (&g == &s_near) { int k = gridWrap(cj, g.N) * g.N + gridWrap(ci, g.N); g_dbgRoadY[k] = road ? rh.y : -999.f; g_dbgWhen[k] = g_dbgFrame; g_dbgHit[k] = road ? (rh.arm ? 1000 + rh.idx : rh.idx) : -1; }
 #endif
     if (hs > g.maxH) g.maxH = hs;
+    shadowCell(g, ci, cj);
 }
 
 static void gridInit(Grid& g, int N, float cell) {
     g.N = N; g.cell = cell; g.inv = 1.f / cell;
     if (!g.c) g.c = (Cell*)(N == 96 ? memFast(sizeof(Cell) * N * N) : memSlow(sizeof(Cell) * N * N));
+    if (!g.sh) g.sh = (uint8_t*)memFast((size_t)(N * N + 7) / 8);   // 1.1 KB near, 0.5 KB far: read by every lit sample
+    if (g.sh) memset(g.sh, 0, (size_t)(N * N + 7) / 8);
+    g.shCur = 0;
     g.jobAxis = -1; g.jobPos = N; g.rebake = -1; g.maxH = -1e9f;
 }
 
@@ -1334,6 +1377,8 @@ void terrainUpdate(float carX, float carZ, float carYaw, float speed, float dt) 
     rebakeStep();
     gridScroll(s_near, nx, nz, 200);
     gridScroll(s_far, fx, fz, 72);
+    shadowStep(s_near, 160);                              // the whole near window every ~2 s, the far one every ~2 s
+    shadowStep(s_far, 64);
     if ((s_frame & 31) == 0) gridMax(s_near);
     if ((s_frame & 31) == 16) gridMax(s_far);
 }

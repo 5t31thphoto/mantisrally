@@ -52,7 +52,7 @@ void renderPhotoClear();
 const uint8_t*  frameBuffer();
 bool            renderDepthFast();       // the depth buffer got internal RAM
 extern const char* g_memNote;          // shown under the FPS readout
-const uint16_t* framePalette565();
+const uint16_t* framePalette565();       // 4 x 256 (byte-swapped 565): one per 2x2 position, (dy * 2 + dx) * 256
 const uint8_t*  framePaletteRGB();
 int             frameBob();
 
