@@ -97,10 +97,21 @@ static void substep(VehicleState& s, const VehicleSpec& V, uint8_t id, const Veh
     s.water = gc.mat == MAT_WATER ? gc.water : 0.f;
     float gVy = (gY - s.lastGY) / dt;
     if (fabsf(gVy) > 40.f) gVy = 0.f;               // cache scroll / teleport, not a real ramp
-    // a face can't throw you upward faster than you're moving across it: ramps up to 45 degrees are untouched;
-    // a stretched near-vertical cell launches you like a ramp, not like a slingshot (that created energy)
-    {   float across = sqrtf(s.u * s.u + s.v * s.v) + 2.f;
-        if (gVy > across) gVy = across; }
+    // a face can't throw you upward faster than you're moving into it: on a slope, only the part of your velocity
+    // toward its uphill side lifts you, at most at 45 degrees. Driving straight up a ramp (up to 45) is untouched;
+    // sliding along a bank or a cliff face (drifting it) still rides up it as far as you're moving into it; but a
+    // slide that's mostly along the face no longer lifts you as if all your speed went up it (the elevator)
+    {   float capV = sqrtf(s.u * s.u + s.v * s.v) + 2.f;
+        const Ground* st = &gc;                                       // the steepest ground under the car (a corner
+        float hn = sqrtf(gc.nx * gc.nx + gc.nz * gc.nz);              // up a face while the middle is still on the flat)
+        const Ground* cand[4] = {&gf, &gr, &gl, &grt};
+        for (const Ground* q : cand) { float h2 = sqrtf(q->nx * q->nx + q->nz * q->nz); if (h2 > hn) { hn = h2; st = q; } }
+        if (hn > 0.34f) {                                            // steeper than 20 degrees: its sine, the normal's lean
+            const float wx = cy * s.u - sy * s.v, wz = sy * s.u + cy * s.v;
+            const float into = -(wx * st->nx + wz * st->nz) / hn;    // speed toward the uphill side
+            capV = fmaxf(into, 0.f) * fminf(hn / fmaxf(st->ny, 0.05f), 1.f) + 2.f;
+        }
+        if (gVy > capV) gVy = capV; }
     s.lastGY = gY;
 
     // ---- suspension: one spring under the CG ----

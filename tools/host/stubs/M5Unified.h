@@ -62,6 +62,7 @@ struct TouchDetail {
 struct HostTouch {
   bool down = false, prev = false; int x = 160, y = 120;
   TouchDetail getDetail() { TouchDetail d; d.x = x; d.y = y; d.pressed = down; d.was = down && !prev; d.rel = !down && prev; return d; }
+  void update(uint32_t) {}
 };
 struct HostRtcDT { struct { int year = 2026, month = 10, date = 19; } date; struct { int hours = 18, minutes = 40; } time; };
 struct HostRtc { HostRtcDT getDateTime() { return HostRtcDT(); } };

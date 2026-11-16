@@ -52,20 +52,40 @@ float terrainNatural(float x, float z) {
 static inline float riverGorge(const Land& L) {
     return clampf(fmaxf(fmaxf((L.cliff - 0.2f) * 2.5f, (L.ridge - 0.4f) * 2.5f), L.ground == MAT_SAND ? 1.f : 0.f), 0.f, 1.f);
 }
+// ---- slow noise on a lattice: the rivers' and the trails' fields change over hundreds of metres, so they're sampled
+// at a lattice's corners (remembered: 16 squares) and blended, with the blend's own gradient. A baked cell costs a few
+// multiplies instead of one to three 2-octave noises (that had made baking a quarter dearer: choppy at speed).
+struct LatMemo { int i, j; float v[4]; };
+static LatMemo s_mRiver[16], s_mTrail[16], s_mBike[16];
+static void latReset() { for (int k = 0; k < 16; k++) s_mRiver[k].i = s_mTrail[k].i = s_mBike[k].i = 0x7fffffff; }
+static float latField(LatMemo* memo, float x, float z, float S, float f, uint32_t salt, float& gx, float& gz) {
+    const float fx = x * (1.f / S), fz = z * (1.f / S);
+    const int i = (int)floorf(fx), j = (int)floorf(fz);
+    LatMemo& m = memo[(i & 3) | ((j & 3) << 2)];
+    if (m.i != i || m.j != j) {
+        m.i = i; m.j = j;
+        const float x0 = i * S * f, z0 = j * S * f, x1 = (i + 1) * S * f, z1 = (j + 1) * S * f;
+        m.v[0] = fbm2(x0, z0, 2, salt); m.v[1] = fbm2(x1, z0, 2, salt); m.v[2] = fbm2(x0, z1, 2, salt); m.v[3] = fbm2(x1, z1, 2, salt);
+    }
+    const float u = fx - i, w = fz - j, a = m.v[0], b = m.v[1], c = m.v[2], d = m.v[3];
+    gx = ((b - a) * (1.f - w) + (d - c) * w) * (1.f / S);
+    gz = ((c - a) * (1.f - u) + (d - b) * u) * (1.f / S);
+    return a + (b - a) * u + (c - a) * w + (a - b - c + d) * u * w;
+}
+
 // The rivers are filled by the lakes' rule (one level for all the water that touches): that holds while the base plane
 // lies (nearly) flat. While it leans (a biome blending into one at another height) the water table leans with it, so
 // the rivers fade out (shallow dry valleys, then nothing) rather than stand at one level up a slope.
 static float riverK() { return clampf(1.f - (journeyTilt() - 0.003f) * (1.f / 0.003f), 0.f, 1.f); }
 static float riverSd(float x, float z, float& ux, float& uz) {     // signed distance to the river's centre line (m)
-    if (riverK() <= 0.f) { ux = uz = 0.f; return 1e4f; }
-    const uint32_t salt = s_seed + 0x41A3u;
-    float n = fbm2(x * 0.0011f, z * 0.0011f, 2, salt) - 0.5f;
     ux = uz = 0.f;
+    if (riverK() <= 0.f) return 1e4f;
+    float gx, gz;
+    const float n = latField(s_mRiver, x, z, 24.f, 0.0011f, s_seed + 0x41A3u, gx, gz) - 0.5f;
     if (fabsf(n) > 0.3f) return n > 0.f ? 1e4f : -1e4f;           // nowhere near one (100 m and more)
-    float gx = fbm2((x + 4.f) * 0.0011f, z * 0.0011f, 2, salt) - 0.5f - n, gz = fbm2(x * 0.0011f, (z + 4.f) * 0.0011f, 2, salt) - 0.5f - n;
-    float gl = sqrtf(gx * gx + gz * gz) * 0.25f;                   // per metre
+    const float gl = sqrtf(gx * gx + gz * gz);                     // per metre
     if (gl < 1e-6f) return n > 0.f ? 1e4f : -1e4f;
-    ux = gx * 0.25f / gl; uz = gz * 0.25f / gl;
+    ux = gx / gl; uz = gz / gl;
     return n / gl;
 }
 static float riverProfile(float d, float wl, float gorge) {          // the carved land's height d metres from the centre
@@ -1076,25 +1096,25 @@ uint8_t terrainNearExtra(float x, float z) {
 //  - singletrack for dirt bikes: a faster-winding noise's contours where no road comes within 120 m, a cell wide
 //    (about 2.5 m), lined close on both sides with trees (or boulders in open country): a car doesn't fit. Small,
 //    steep kickers on a 20 m lattice.
-static float contourDist(float x, float z, float f, uint32_t salt) {
-    float n = fbm2(x * f, z * f, 2, salt);
-    if (fabsf(n - 0.5f) > 0.12f) return 1e9f;                          // (far from any: no gradient needed)
-    float gx = fbm2((x + 1.f) * f, z * f, 2, salt) - n, gz = fbm2(x * f, (z + 1.f) * f, 2, salt) - n;
-    float gl = sqrtf(gx * gx + gz * gz);
-    return gl > 1e-5f ? fabsf(n - 0.5f) / gl : 1e9f;
+static float contourDist(LatMemo* memo, float S, float x, float z, float f, uint32_t salt) {
+    float gx, gz;
+    const float n = latField(memo, x, z, S, f, salt, gx, gz);
+    if (fabsf(n - 0.5f) > 0.12f) return 1e9f;                          // (far from any)
+    const float gl = sqrtf(gx * gx + gz * gz);
+    return gl > 1e-7f ? fabsf(n - 0.5f) / gl : 1e9f;
 }
-static void contourDir(float x, float z, float f, uint32_t salt, float& ux, float& uz) {   // along the contour
-    float gx = fbm2((x + 1.f) * f, z * f, 2, salt) - fbm2((x - 1.f) * f, z * f, 2, salt);
-    float gz = fbm2(x * f, (z + 1.f) * f, 2, salt) - fbm2(x * f, (z - 1.f) * f, 2, salt);
-    float gl = sqrtf(gx * gx + gz * gz);
-    if (gl < 1e-7f) { ux = 1.f; uz = 0.f; return; }
+static void contourDir(LatMemo* memo, float S, float x, float z, float f, uint32_t salt, float& ux, float& uz) {   // along the contour
+    float gx, gz;
+    latField(memo, x, z, S, f, salt, gx, gz);
+    const float gl = sqrtf(gx * gx + gz * gz);
+    if (gl < 1e-9f) { ux = 1.f; uz = 0.f; return; }
     ux = -gz / gl; uz = gx / gl;
 }
 static constexpr float TRAIL_F = 0.004f, BIKE_F = 0.0065f;
 static inline uint32_t trailSalt() { return s_seed + 0x7A1Eu; }
 static inline uint32_t bikeSalt() { return s_seed + 0x8B1Eu; }
-static float trailDist(float x, float z) { return contourDist(x, z, TRAIL_F, trailSalt()); }
-static float bikeDist(float x, float z) { return contourDist(x, z, BIKE_F, bikeSalt()); }
+static float trailDist(float x, float z) { return contourDist(s_mTrail, 8.f, x, z, TRAIL_F, trailSalt()); }
+static float bikeDist(float x, float z) { return contourDist(s_mBike, 6.f, x, z, BIKE_F, bikeSalt()); }
 static bool trailLand(const Land& L) { return L.ground != MAT_SNOW && L.water < 0.6f; }
 // the off-road trail's jump in lattice cell (li, lj): 0 none, 1 a tabletop at (jx, jz), 2 a launch ramp (r)
 static int trailJump(int li, int lj, float& jx, float& jz, Ramp* r) {
@@ -1107,7 +1127,7 @@ static int trailJump(int li, int lj, float& jx, float& jz, Ramp* r) {
     if (trailDist(jx, jz) > 1.2f) return 0;
     if (!ramp) return 1;
     if (r) {
-        r->x = jx; r->z = jz; contourDir(jx, jz, TRAIL_F, trailSalt(), r->ux, r->uz);
+        r->x = jx; r->z = jz; contourDir(s_mTrail, 8.f, jx, jz, TRAIL_F, trailSalt(), r->ux, r->uz);
         if (hj & 0x40000000u) { r->ux = -r->ux; r->uz = -r->uz; }      // either way along the trail
     }
     return 2;
@@ -1602,6 +1622,7 @@ void terrainInit(uint32_t seed) {
     s_seed = seed ? seed : 1;
     s_noCar = true;
     s_featN = 0; s_featX = s_featZ = 1e9f;
+    latReset();
     // everything a world carries, from scratch (the game inits once; the host tests init many worlds in a row)
     s_juncEvent = false; s_juncTookArm = false; s_storeReq = false; s_carDir = 1; s_carRoadDist = 0.f;
     memset(&s_gA, 0, sizeof(s_gA)); s_armMarks = false; deckClear(); s_frame = 0;
@@ -1834,6 +1855,16 @@ void terrainGroundRef(float x, float z, float refY, Ground& g) {
     g.h = y; g.nx = -gx * inv; g.ny = inv; g.nz = -gz * inv;
     g.across = ac; g.half = hf; g.along = 0.f; g.mat = MAT_ROAD; g.surf = sf; g.water = 0.f;
 }
+uint8_t terrainDeckKind(float x, float z, float refY) {
+    if (!s_deck.on) return 0;
+    float y, gx, gz, ac, hf; uint8_t sf;
+    if (!deckAt(x, z, y, gx, gz, ac, hf, sf)) return 0;
+    Ground g; terrainGround(x, z, g);
+    if (refY < y - 1.2f || y < g.h - 0.6f) return 0;                // (as terrainGroundRef: down below, or into a bank)
+    const int mid = (s_deck.lo + s_deck.hi) / 2;
+    const RoadNode& n = s_deck.arm ? roadArmNode(mid) : roadNode(mid);
+    return (n.side & RN_SIDE_RIVER) ? 2 : 1;
+}
 float terrainHeightRef(float x, float z, float refY) { Ground g; terrainGroundRef(x, z, refY, g); return g.mat == MAT_WATER ? g.h + g.water : g.h; }
 
 bool vegAt(int ci, int cj, Veg& v) {
@@ -1859,7 +1890,15 @@ bool vegAt(int ci, int cj, Veg& v) {
         case VEG_BOULDER: v.size = 0.9f + 2.4f * s; v.radius = v.size * 0.45f; break;
         default:          v.size = 0.4f; v.radius = 0.f; break;
     }
-    v.y = c.h * 0.1f;
+    {   // its own spot on the land (the cells' blend there, as drawn), not its cell's corner: on a slope that had
+        // floated it (or sunk it) by up to the slope across most of a cell. A hair into the ground.
+        const Cell& b = g.c[gridWrap(cj, g.N) * g.N + gridWrap(ci + 1, g.N)];
+        const Cell& d = g.c[gridWrap(cj + 1, g.N) * g.N + gridWrap(ci, g.N)];
+        const Cell& e = g.c[gridWrap(cj + 1, g.N) * g.N + gridWrap(ci + 1, g.N)];
+        const float fx = v.x * g.inv - ci, fz = v.z * g.inv - cj;
+        const float h0 = c.h + (b.h - c.h) * fx, h1 = d.h + (e.h - d.h) * fx;
+        v.y = (h0 + (h1 - h0) * fz) * 0.1f - 0.12f;
+    }
     return true;
 }
 

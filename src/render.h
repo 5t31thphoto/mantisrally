@@ -37,6 +37,7 @@ extern ViewInfo g_view;
 void renderInit();
 void renderSetVehicle(uint8_t v);               // loads its colours / cockpit
 void renderFrame();
+extern void (*g_renderTick)();   // called between the frame's phases (main: the haptics and the touch panel, finer than once a frame)
 // a world point on the framebuffer (160x120). false if behind the camera.
 bool renderProject(float wx, float wy, float wz, float& sx, float& sy, float& depth);
 void renderSplat(float strength);               // mud on the glass / lens

@@ -47,6 +47,18 @@ static void message(const char* m, const char* sub = nullptr, float secs = 3.f) 
 }
 
 static float s_onRoadT = -100.f; static int s_roadDir = 0;   // when you were last driving on the road, and which way
+// The motor and the touch panel, on the clock: once a frame here and between the frame's phases (render's tick), so a
+// haptic pattern keeps its own timing however long a frame takes and a quick tap is never missed between frames.
+static uint32_t s_feelMs = 0;
+static void feelTick() {
+    const uint32_t now = millis();
+    if (now - s_feelMs < 4) return;
+    const float dt = s_feelMs ? fminf(0.1f, (now - s_feelMs) * 0.001f) : 0.016f;
+    s_feelMs = now;
+    hx::update(dt);
+}
+static void renderTickHook() { helmPoll(); feelTick(); }
+
 static void placeOnRoad(bool keepPos) {
     float x = car.x, z = car.z, yaw = car.yaw;
     if (!keepPos) { x = 0.f; z = 0.f; }
@@ -101,6 +113,7 @@ void setup() {
     renderInit();
     helmInit();
     hx::begin();
+    g_renderTick = renderTickHook;                   // the motor and the touch panel between the frame's phases
     {   // did the hot buffers get fast internal RAM? (shown under the FPS readout)
         static char note[40];
         bool lcd = displayStreaming(), grid = memIsFast(terrainNear().c), depth = renderDepthFast(), snd = audioRunning();
@@ -136,7 +149,7 @@ void loop() {
         if (!storeUpdate(ev.tap, ev.tapX, ev.tapY, changed)) { message("DRIVE SAFE", nullptr, 1.5f); progressSave(); }
         if (changed) { switchVehicle(g_prog.current); sfxUi(UI_SOLD); }
         displayPresent();
-        hx::update(dt);
+        feelTick();
         return;
     }
     // ---------------- photo mode ----------------
@@ -153,7 +166,7 @@ void loop() {
             if (ev.horn) sfxImpact(IMP_SHUTTER, 1.f);                // A: the shutter
             photoCompose(ev.horn);
             displayPresent();
-            hx::update(dt);
+            feelTick();
             return;
         }
     }
@@ -356,9 +369,10 @@ void loop() {
     g_car.speed = car.speed; g_car.water = car.water; g_car.surf = car.surf; g_car.air = car.air; g_car.limiter = car.limiterT > 0.f;
     g_car.reverse = car.reverse; g_car.cockpit = g_prog.view == VIEW_COCKPIT;
     hx::engine(in.throttle, car.rpm / V.redline * 10.f);
-    float rough = car.surf == SURF_TARMAC ? 0.05f : (car.surf == SURF_GRAVEL ? 0.3f : 0.4f);
-    hx::rumble(car.air ? 0.f : fminf(1.f, rough * fminf(1.f, car.speed / 20.f) + car.spin * 0.4f + (car.slipR > 1.f ? 0.3f : 0.f)));
-    hx::update(dt);
+    {   const uint8_t deck = terrainDeckKind(car.x, car.z, car.y - V.rideHeight + 0.5f);
+        g_car.deck = deck;
+        hx::surface(car.surf, deck, car.speed, fminf(1.f, car.spin * 0.6f + (car.slipR > 1.f ? 0.4f : 0.f)), car.air); }
+    feelTick();
 
     // ---------------- picture ----------------
     ViewInfo& v = g_view;

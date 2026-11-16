@@ -62,32 +62,40 @@ int radioVolume() { return s_vol; }
 void radioSetPaused(bool p) { s_paused = p; }
 
 // ================================================================================================ the recordings
-// /radio/radio.bin (tools/radio/radio_studio.py): "MRAD", u16 version (1), u16 count, count x 16-byte entries
-// {u8 station (0 = any), u8 kind, u16 rate, u32 samples, u32 offset (from the end of the table), u32 bytes}, then
-// the clips: IMA ADPCM, 4 bits, low nibble first, decoder starting at predictor 0, index 0.
+// /radio/radio.bin (tools/radio/radio_studio.py): "MRAD", u16 version, u16 count, count entries, then the clips:
+// IMA ADPCM, 4 bits, low nibble first, decoder starting at predictor 0, index 0.
+//   version 1: 16-byte entries {u8 station (0 = any), u8 kind, u16 rate, u32 samples, u32 offset (from the end of
+//              the table), u32 bytes}
+//   version 2: 20-byte entries, the same and then {u16 biomes, u16 reserved}: bit b set = plays in biome b (B_*);
+//              0 = every biome. A version 1 bank plays everywhere.
 enum : uint8_t { CK_ID = 0, CK_TALK, CK_MORNING, CK_DAY, CK_EVENING, CK_NIGHT, CK_RAIN, CK_SNOW, CK_FOG, CK_CLEAR, CK_AD, CK_N };
-struct Clip { uint8_t station, kind; uint16_t rate; uint32_t samples; const uint8_t* data; uint32_t bytes; };
-static constexpr int CLIP_MAX = 160;
+struct Clip { uint8_t station, kind; uint16_t rate, biomes; uint32_t samples; const uint8_t* data; uint32_t bytes; };
+static constexpr int CLIP_MAX = 320;                 // (the table lives in PSRAM: 24 bytes a clip)
 static Clip* s_clips = nullptr;                          // the table, in PSRAM (only when there is a bank)
 static volatile int s_nClips = 0;
 int radioClipCount() { return s_nClips; }
 
 static void parseBank(const uint8_t* d, uint32_t n) {
     if (!d || n < 8 || memcmp(d, "MRAD", 4) != 0) return;
+    const int ver = d[4] | (d[5] << 8);
+    const uint32_t ES = ver >= 2 ? 20 : 16;                  // an entry's size
+    if (ver < 1 || ver > 2) return;
     int count = d[6] | (d[7] << 8);
-    uint32_t table = 8 + (uint32_t)count * 16;
+    uint32_t table = 8 + (uint32_t)count * ES;
     if (table > n || count <= 0) return;
     if (count > CLIP_MAX) count = CLIP_MAX;
     Clip* clips = (Clip*)memSlow(sizeof(Clip) * count);
     if (!clips) return;
     int k = 0;
     for (int i = 0; i < count && k < CLIP_MAX; i++) {
-        const uint8_t* e = d + 8 + i * 16;
+        const uint8_t* e = d + 8 + i * ES;
         Clip c;
         c.station = e[0]; c.kind = e[1]; c.rate = (uint16_t)(e[2] | (e[3] << 8));
         c.samples = (uint32_t)e[4] | ((uint32_t)e[5] << 8) | ((uint32_t)e[6] << 16) | ((uint32_t)e[7] << 24);
         uint32_t off = (uint32_t)e[8] | ((uint32_t)e[9] << 8) | ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
         c.bytes = (uint32_t)e[12] | ((uint32_t)e[13] << 8) | ((uint32_t)e[14] << 16) | ((uint32_t)e[15] << 24);
+        c.biomes = ES >= 20 ? (uint16_t)(e[16] | (e[17] << 8)) : 0;
+        if (c.biomes == 0) c.biomes = 0xFFFF;                    // every biome
         if (c.kind >= CK_N || c.station >= RADIO_N || c.rate < 4000 || c.rate > 16000) continue;
         if (table + off + c.bytes > n || c.bytes < (c.samples + 1) / 2) continue;
         c.data = d + table + off;
@@ -100,7 +108,7 @@ static void parseBank(const uint8_t* d, uint32_t n) {
 void radioLoadClips() {
 #ifndef HOST
     if (!storageOk()) return;
-    static const uint32_t MAX_BYTES = 1536 * 1024;          // the tool keeps a bank under 1 MB; anything bigger is cut
+    static const uint32_t MAX_BYTES = 2560 * 1024;          // 2.5 MB of PSRAM (the rest of the game keeps ~0.6 MB of its 4 MB there)
     displayHoldBus();                                       // the card shares the SPI bus with the screen
     File f = SD.open("/radio/radio.bin");
     uint8_t* buf = nullptr; uint32_t n = 0;
@@ -410,15 +418,19 @@ struct Station {
 static Station s_st[RADIO_N];
 static int64_t s_T = 0;                                  // the radio clock: samples at RSR since boot
 
+// a recording of this kind for this station that may play here: this station's own first, then any station's; only
+// those whose biomes include the one you're in (a farm ad only where the farms are)
 static int pickClip(uint8_t st, uint8_t kind, uint32_t r) {
     int n = s_nClips;
-    for (int pass = 0; pass < 2; pass++) {                 // this station's own recordings first, then any station's
+    const uint8_t b = g_scene.blend < 0.5f ? g_scene.biomeA : g_scene.biomeB;
+    const uint16_t here = (uint16_t)(1u << (b & 15));
+    for (int pass = 0; pass < 2; pass++) {
         uint8_t want = pass ? 0 : st;
         int k = 0;
-        for (int i = 0; i < n; i++) if (s_clips[i].kind == kind && s_clips[i].station == want) k++;
+        for (int i = 0; i < n; i++) if (s_clips[i].kind == kind && s_clips[i].station == want && (s_clips[i].biomes & here)) k++;
         if (!k) continue;
         int pick = (int)(r % (uint32_t)k);
-        for (int i = 0; i < n; i++) if (s_clips[i].kind == kind && s_clips[i].station == want && pick-- == 0) return i;
+        for (int i = 0; i < n; i++) if (s_clips[i].kind == kind && s_clips[i].station == want && (s_clips[i].biomes & here) && pick-- == 0) return i;
     }
     return -1;
 }

@@ -93,6 +93,7 @@ struct Ground {
 };
 void terrainGround(float x, float z, Ground& g);
 float terrainHeight(float x, float z);
+uint8_t terrainDeckKind(float x, float z, float refY);   // the deck the wheels are on there: 0 none, 1 timber, 2 a river bridge (concrete)
 // The same, aware of trestle decks: refY is the height you are at now (your wheels' last ground). Near a deck, on it if
 // you are up at its level, under it if you are down at the road or land below. Without a deck: terrainGround exactly.
 void terrainGroundRef(float x, float z, float refY, Ground& g);

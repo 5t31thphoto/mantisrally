@@ -29,5 +29,6 @@ float helmBrake();      // 0 .. 1
 float helmTip();        // -1 .. 1 (+ = top away): air pitch on the bike
 bool  helmHandbrake();
 void  helmRecenter();
+void  helmPoll();       // read the touch panel now (between the frame's phases): its taps and swipes come with the next update
 
 }

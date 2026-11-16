@@ -21,6 +21,9 @@ void scanTick(float level);                       // scanner / pace-note read
 void scanDone(bool fresh);
 void eruption(float power);                       // reserved
 void engine(float throttle, float speed);         // continuous: revs, per frame
-void rumble(float amount);                        // continuous: gravel / slip, per frame
-void update(float dt);
+void rumble(float amount);                        // continuous: gravel / slip, per frame (kept; surface() is the feel)
+// what the tyres are on, per frame: each surface its own texture under your hands (surf SURF_*, deck 0 none,
+// 1 timber planks, 2 a concrete bridge), with speed (m/s), slip (0..1) and whether you're in the air
+void surface(uint8_t surf, uint8_t deck, float speed, float slip, bool air);
+void update(float dt);                           // as often as you can: it runs on the clock (millis)
 }

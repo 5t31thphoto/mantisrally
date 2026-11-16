@@ -18,8 +18,8 @@ constexpr bool  INVERT_STEER    = true;    // M5's roll is + leaning left on the
 constexpr bool  INVERT_TIP      = false;   // + = top away = throttle
 constexpr uint32_t HOLD_B_MS    = 650;
 constexpr uint32_t MUTE_HOLD_MS = 1500;
-constexpr uint32_t TAP_MS       = 400;
-constexpr uint32_t DOUBLE_MS    = 700;     // first tap's release to the second's release (a real double tap)
+constexpr uint32_t TAP_MS       = 450;
+constexpr uint32_t DOUBLE_MS    = 900;     // first tap's release to the second's release (a real double tap)
 constexpr uint32_t SWIPE_MS     = 700;     // a swipe is quick...
 constexpr int SWIPE_X = 70, SWIPE_Y = 60;  // ...and long (panel pixels), and mostly one way (twice the other)
 // ======================================================
@@ -63,6 +63,36 @@ static float stick(float deg, float dead, float full, float expo) {
     return deg < 0.f ? -e : e;
 }
 
+static HelmEvents s_pend;                // touch events since the last update (taps, swipes, the mute hold)
+static bool s_btnWas = false;
+static void touchStep(uint32_t now, bool btn) {
+    s_btnWas = btn;
+    auto t = M5.Touch.getDetail();
+    bool down = t.isPressed() && t.y < 236 && !btn;
+    if (down && !s_touch) { s_touch = true; s_moved = false; s_muteFired = false; s_tx0 = t.x; s_ty0 = t.y; s_tt0 = now; s_tx1 = t.x; s_ty1 = t.y; }
+    else if (down && s_touch) {
+        s_tx1 = t.x; s_ty1 = t.y;
+        if (abs(t.x - s_tx0) + abs(t.y - s_ty0) > 40) s_moved = true;      // a finger jitters in a moving (and buzzing) car
+        if (!s_moved && !s_muteFired && now - s_tt0 > MUTE_HOLD_MS) { s_muteFired = true; s_pend.mute = true; }
+    } else if (!down && s_touch) {
+        if (!s_moved && !s_muteFired && now - s_tt0 < TAP_MS) {
+            s_pend.tap = true; s_pend.tapX = s_tx0; s_pend.tapY = s_ty0;
+            if (s_lastTap && now - s_lastTap < DOUBLE_MS && abs(s_tx0 - s_ltx) + abs(s_ty0 - s_lty) < 160) { s_pend.doubleTap = true; s_lastTap = 0; }
+            else { s_lastTap = now; s_ltx = s_tx0; s_lty = s_ty0; }
+        } else if (s_moved && !s_muteFired && now - s_tt0 < SWIPE_MS) {
+            int dx = s_tx1 - s_tx0, dy = s_ty1 - s_ty0;
+            if (abs(dx) >= SWIPE_X && abs(dx) > 2 * abs(dy)) s_pend.swipeX = (int8_t)(dx > 0 ? 1 : -1);
+            else if (abs(dy) >= SWIPE_Y && abs(dy) > 2 * abs(dx)) s_pend.swipeY = (int8_t)(dy < 0 ? 1 : -1);
+        }
+        s_touch = false;
+    }
+}
+void helmPoll() {
+    const uint32_t now = millis();
+    M5.Touch.update(now);
+    touchStep(now, s_btnWas);
+}
+
 void helmUpdate(float dt, HelmEvents& ev) {
     memset(&ev, 0, sizeof(ev));
     M5.update();
@@ -89,26 +119,11 @@ void helmUpdate(float dt, HelmEvents& ev) {
         s_tip += (stick(dP, TIP_DEAD_DEG, TIP_FULL_DEG, 0.3f) - s_tip) * k;
     }
 
-    // ---- touch: the picture only (the button strip below it is A/B/C) ----
-    auto t = M5.Touch.getDetail();
-    bool down = t.isPressed() && t.y < 236 && !(a || b || c);
-    if (down && !s_touch) { s_touch = true; s_moved = false; s_muteFired = false; s_tx0 = t.x; s_ty0 = t.y; s_tt0 = now; s_tx1 = t.x; s_ty1 = t.y; }
-    else if (down && s_touch) {
-        s_tx1 = t.x; s_ty1 = t.y;
-        if (abs(t.x - s_tx0) + abs(t.y - s_ty0) > 24) s_moved = true;      // a finger jitters in a moving car
-        if (!s_moved && !s_muteFired && now - s_tt0 > MUTE_HOLD_MS) { s_muteFired = true; ev.mute = true; }
-    } else if (!down && s_touch) {
-        if (!s_moved && !s_muteFired && now - s_tt0 < TAP_MS) {
-            ev.tap = true; ev.tapX = s_tx0; ev.tapY = s_ty0;
-            if (s_lastTap && now - s_lastTap < DOUBLE_MS && abs(s_tx0 - s_ltx) + abs(s_ty0 - s_lty) < 100) { ev.doubleTap = true; s_lastTap = 0; }
-            else { s_lastTap = now; s_ltx = s_tx0; s_lty = s_ty0; }
-        } else if (s_moved && !s_muteFired && now - s_tt0 < SWIPE_MS) {
-            int dx = s_tx1 - s_tx0, dy = s_ty1 - s_ty0;
-            if (abs(dx) >= SWIPE_X && abs(dx) > 2 * abs(dy)) ev.swipeX = (int8_t)(dx > 0 ? 1 : -1);
-            else if (abs(dy) >= SWIPE_Y && abs(dy) > 2 * abs(dx)) ev.swipeY = (int8_t)(dy < 0 ? 1 : -1);
-        }
-        s_touch = false;
-    }
+    // ---- touch: the picture only (the button strip below it is A/B/C); read here and between the frame's phases ----
+    touchStep(now, a || b || c);
+    ev.tap = s_pend.tap; ev.tapX = s_pend.tapX; ev.tapY = s_pend.tapY; ev.doubleTap = s_pend.doubleTap;
+    ev.swipeX = s_pend.swipeX; ev.swipeY = s_pend.swipeY; if (s_pend.mute) ev.mute = true;
+    memset(&s_pend, 0, sizeof(s_pend));
 }
 
 }

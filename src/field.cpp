@@ -215,6 +215,50 @@ static void pastureCollide(VehicleState& car, uint8_t vehicle, FieldHit& out) {
     }
 }
 
+// ---- tunnels: the tube's walls and roof are solid (as drawn: walls 1.6 m past the road's edge, the crown 6.6 m up,
+// the haunches down to 4.6 m at the walls). The car is held inside: pushed back out of a wall with the speed into it
+// taken off (a little bounce, a scrape), and kept under the roof.
+static void tunnelCollide(VehicleState& car, uint8_t vehicle, FieldHit& out) {
+    RoadHit rh;
+    if (!roadNearest(car.x, car.z, rh, 14.f) || !(rh.flags & RN_TUNNEL)) return;
+    const int n = rh.arm ? roadArmCount() : roadCount();
+    if (rh.idx < 0 || rh.idx + 1 >= n) return;
+    const RoadNode& a = rh.arm ? roadArmNode(rh.idx) : roadNode(rh.idx);
+    const RoadNode& b = rh.arm ? roadArmNode(rh.idx + 1) : roadNode(rh.idx + 1);
+    float dx = b.x - a.x, dz = b.z - a.z, L = sqrtf(dx * dx + dz * dz);
+    if (L < 0.1f) return;
+    dx /= L; dz /= L;
+    const float px = -dz, pz = dx;                                  // across the segment
+    float tq = ((car.x - a.x) * dx + (car.z - a.z) * dz) / L;
+    tq = tq < 0.f ? 0.f : (tq > 1.f ? 1.f : tq);
+    const float ac = (car.x - a.x) * px + (car.z - a.z) * pz;
+    const float hf = (a.half20 + (b.half20 - a.half20) * tq) * 0.05f + 1.6f;
+    const float roadY = a.y + (b.y - a.y) * tq;
+    const VehicleSpec& V = vehicleSpec(vehicle);
+    const float body = V.bike ? 0.45f : V.track * 0.6f, lim = hf - body;
+    const float cy = cosf(car.yaw), sy = sinf(car.yaw);
+    if (fabsf(ac) > lim) {                                          // a wall
+        const float sg = ac > 0.f ? 1.f : -1.f, nx = px * sg, nz = pz * sg;
+        const float pen = fabsf(ac) - lim;
+        car.x -= nx * pen; car.z -= nz * pen;
+        float wx = cy * car.u - sy * car.v, wz = sy * car.u + cy * car.v;
+        const float vn = wx * nx + wz * nz;
+        if (vn > 0.f) {
+            wx -= nx * vn * 1.2f; wz -= nz * vn * 1.2f;
+            wx *= 0.97f; wz *= 0.97f;
+            car.u = cy * wx + sy * wz; car.v = -sy * wx + cy * wz;
+            if (vn > out.strength) { out.strength = vn; out.kind = HIT_ROCK; }
+        }
+    }
+    const float aa = fabsf(ac) < hf ? fabsf(ac) : hf;               // the roof
+    const float roof = aa < 0.55f * hf ? 6.6f : 4.6f + 2.f * (hf - aa) / (0.45f * hf);
+    const float top = V.bike ? 1.25f : 1.0f;                        // the car's roof over its own height
+    if (car.y + top > roadY + roof) {
+        car.y = roadY + roof - top;
+        if (car.vy > 0.f) { if (car.vy > out.strength) { out.strength = car.vy; out.kind = HIT_ROCK; } car.vy *= -0.2f; }
+    }
+}
+
 // ---- arches: in the Red Canyon, now and then the road runs under a red rock arch (one chance in each 360 m of road)
 static Arch s_arch[4]; static int s_archN = 0;
 static Geyser s_gey[8]; static int s_geyN = 0;
@@ -404,6 +448,7 @@ FieldHit fieldCollide(VehicleState& car, uint8_t vehicle) {
         car.vy = fmaxf(car.vy, 7.f + g.h * 0.25f);
     }
     pastureCollide(car, vehicle, out);
+    tunnelCollide(car, vehicle, out);
     // deer: rarely, one doesn't make it. A puff of fur, a brief light-red mist, and it's gone.
     float cy = cosf(car.yaw), sy = sinf(car.yaw);
     for (Critter& c : s_c) {

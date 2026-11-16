@@ -12,7 +12,7 @@ constexpr int AUDIO_SR = 24000;
 struct CarAudio {
     uint8_t engine;            // ENG_*
     float rpm, rpm01, throttle, boost, spin, slide, speed, water;
-    uint8_t surf;
+    uint8_t surf, deck;        // deck: 0 none, 1 timber planks, 2 a concrete river bridge
     bool air, limiter, reverse, cockpit;
 };
 extern CarAudio g_car;

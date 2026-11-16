@@ -17,10 +17,12 @@ Input: WAV files (8/16/24/32-bit PCM, any rate, mono or stereo). Other formats (
 work when ffmpeg is installed and on the PATH. Only the Python standard library is needed; numpy makes it faster.
 
 The file format (shared with src/radio.cpp):
-  "MRAD", u16 version = 1, u16 count, then count x 16-byte entries
+  "MRAD", u16 version = 2, u16 count, then count x 20-byte entries
       {u8 station (0 = any, 1 lo-fi, 2 math rock, 3 country), u8 kind, u16 sample rate, u32 samples,
-       u32 offset from the end of the table, u32 bytes}
+       u32 offset from the end of the table, u32 bytes, u16 biomes (bit b: plays in biome b; 0 = every biome),
+       u16 reserved}
   then the clips: IMA ADPCM, 4 bits a sample, low nibble first, the decoder starting at predictor 0, index 0.
+  (The game still reads version 1 banks: 16-byte entries, every line in every biome.)
 """
 import json, math, os, struct, subprocess, sys, tempfile, wave, shutil, array
 
@@ -29,7 +31,7 @@ try:
 except ImportError:
     np = None
 
-VERSION = 1
+VERSION = 2
 STATIONS = ["Any station", "88.7 LO-FI MANTIS", "96.1 THE ODD METER", "101.5 BACKROADS"]
 KINDS = ["Station ID", "Talk", "Morning", "Daytime", "Evening", "Night", "Rain", "Snow", "Fog", "Clear skies", "Ad"]
 KIND_HELP = {
@@ -39,8 +41,39 @@ KIND_HELP = {
     6: "Played when it's raining.", 7: "Played when it's snowing.", 8: "Played in fog.", 9: "Played in clear weather.",
     10: "A Mantis Motors ad. Plays every third break, on any station.",
 }
-BUDGET_BYTES = 1024 * 1024           # what the game is happy to keep in PSRAM (it reads at most 1.5 MB)
+BUDGET_BYTES = 2560 * 1024           # what the game keeps in PSRAM (it reads at most 2.5 MB of the file)
 RATES = [6000, 8000]
+# the game's biomes, in its order (B_* in src/journey.h); a line with none ticked plays in every biome
+BIOMES = ["Pine Forest", "Redwood Cathedral", "Lake Country", "Rain Moor", "Devil's Pass", "Alpine Summit",
+          "Red Canyon", "Coast Highway", "Wildflower Meadow", "Autumn Ridge", "Bayou Mud", "Frost Tundra"]
+BIOME_SHORT = ["Pines", "Redwood", "Lakes", "Moor", "Devils", "Summit", "Canyon", "Coast", "Meadow", "Autumn", "Bayou", "Tundra"]
+# where the game's own features turn up (from its land numbers), for lines about them
+BIOME_PRESETS = [
+    ("Every biome", []),
+    ("Farm country", [3, 8, 10]),          # crops, pastures and cattle: Rain Moor, Wildflower Meadow, Bayou Mud
+    ("Geyser country", [3, 4, 11]),        # Rain Moor, Devil's Pass, Frost Tundra
+    ("Red rock arches", [6]),              # Red Canyon
+    ("Forest", [0, 1, 9]),                 # Pine Forest, Redwood Cathedral, Autumn Ridge
+    ("Mountains", [4, 5]),                 # Devil's Pass, Alpine Summit (tunnels, switchbacks)
+]
+PAUSE_MAX = 0.25                     # a pause inside a line longer than this is tightened to it (seconds)
+
+def biome_mask(slot):
+    m = 0
+    for b in slot.get("biomes", []) or []:
+        if 0 <= int(b) < len(BIOMES): m |= 1 << int(b)
+    return m
+
+def biome_label(slot):
+    bs = sorted(set(int(b) for b in (slot.get("biomes") or []) if 0 <= int(b) < len(BIOMES)))
+    if not bs: return "All"
+    for name, pb in BIOME_PRESETS[1:]:
+        if bs == sorted(pb): return name
+    return ", ".join(BIOME_SHORT[b] for b in bs)
+
+def slot_rate(slot, project_rate):
+    r = int(slot.get("rate", 0) or 0)
+    return r if r in RATES else int(project_rate)
 
 # ------------------------------------------------------------------------------------------------ the scripts
 # Short on purpose: a radio break is a breath between songs. Read them in character; ad-libbing is encouraged.
@@ -101,8 +134,8 @@ DEFAULT_SCRIPTS = [
 ]
 
 def default_project():
-    return {"version": 1, "rate": 6000, "slots": [
-        {"station": st, "kind": k, "script": txt, "file": ""} for st, k, txt in DEFAULT_SCRIPTS]}
+    return {"version": 2, "rate": 6000, "slots": [
+        {"station": st, "kind": k, "script": txt, "file": "", "biomes": [], "rate": 0} for st, k, txt in DEFAULT_SCRIPTS]}
 
 # ------------------------------------------------------------------------------------------------ reading audio
 def _ffmpeg_to_wav(path):
@@ -236,7 +269,20 @@ def process_voice(x, rate, out_rate, grit=0.15):
     first = next((i for i, l in enumerate(lev) if l > th), 0)
     last = len(lev) - next((i for i, l in enumerate(reversed(lev)) if l > th), 0)
     pad = int(0.08 * mid)
-    x = x[max(0, first - pad):min(len(x), last + pad)]
+    lo, hi = max(0, first - pad), min(len(x), last + pad)
+    x, lev = x[lo:hi], lev[lo:hi]
+    # 2b) tighten the pauses inside it: a gap longer than PAUSE_MAX keeps PAUSE_MAX of air (half each side)
+    keep = int(PAUSE_MAX * mid); out_x = []; i = 0; n = len(x)
+    while i < n:
+        if lev[i] > th: out_x.append(x[i]); i += 1; continue
+        j = i
+        while j < n and lev[j] <= th: j += 1
+        if j - i > keep:
+            out_x.extend(x[i:i + keep // 2]); out_x.extend(x[j - keep // 2:j])
+        else:
+            out_x.extend(x[i:j])
+        i = j
+    x = out_x
     # 3) the radio voice: presence, a little body, the top rolled off
     x = Biquad("peak", 2200, mid, 0.9, 5.0).run(x)
     x = Biquad("peak", 220, mid, 0.8, 2.0).run(x)
@@ -317,28 +363,29 @@ def build_clip(slot, rate, base_dir=""):
 
 def build_bank(project, base_dir="", progress=None):
     """-> (bytes of radio.bin, manifest text, warnings)"""
-    rate = int(project.get("rate", 6000))
+    prate = int(project.get("rate", 6000))
     entries, blobs, lines, warnings = [], [], [], []
     slots = [s for s in project["slots"] if s.get("file")]
     for i, s in enumerate(slots):
         if progress: progress(i, len(slots), s)
+        rate = slot_rate(s, prate)
         try:
             y, data = build_clip(s, rate, base_dir)
         except Exception as e:
             warnings.append("%s / %s: %s" % (STATIONS[s["station"]], KINDS[s["kind"]], e)); continue
-        entries.append((s["station"], s["kind"], rate, len(y), len(data)))
+        entries.append((s["station"], s["kind"], rate, len(y), len(data), biome_mask(s)))
         blobs.append(data)
-        lines.append("%-20s %-12s %5.1f s %7d bytes  %s" % (STATIONS[s["station"]], KINDS[s["kind"]], len(y) / rate, len(data), s["script"][:60]))
+        lines.append("%-20s %-12s %-18s %5d Hz %5.1f s %7d bytes  %s" % (STATIONS[s["station"]], KINDS[s["kind"]], biome_label(s)[:18], rate, len(y) / rate, len(data), s["script"][:60]))
     head = b"MRAD" + struct.pack("<HH", VERSION, len(entries))
     table = b""; off = 0
-    for (st, k, r, n, b) in entries:
-        table += struct.pack("<BBHIII", st, k, r, n, off, b); off += b
+    for (st, k, r, n, b, bm) in entries:
+        table += struct.pack("<BBHIIIHH", st, k, r, n, off, b, bm, 0); off += b
     out = head + table + b"".join(blobs)
     total = len(out)
-    manifest = ["Mantis Rally radio bank: %d clips, %.1f KB (%.0f%% of the %d KB budget), %d Hz 4-bit ADPCM"
-                % (len(entries), total / 1024, 100.0 * total / BUDGET_BYTES, BUDGET_BYTES // 1024, rate), ""] + lines
+    manifest = ["Mantis Rally radio bank: %d clips, %.1f KB (%.0f%% of the %d KB budget), 4-bit ADPCM, %d Hz unless a line says"
+                % (len(entries), total / 1024, 100.0 * total / BUDGET_BYTES, BUDGET_BYTES // 1024, prate), ""] + lines
     if total > BUDGET_BYTES:
-        warnings.append("The bank is %.0f KB, over the %d KB budget: the game will still load up to 1536 KB, but trim some clips or use 6000 Hz." % (total / 1024, BUDGET_BYTES // 1024))
+        warnings.append("The bank is %.0f KB, over the %d KB the game reads: lines past that are cut off. Drop some, or use 6000 Hz." % (total / 1024, BUDGET_BYTES // 1024))
     return out, "\n".join(manifest) + "\n", warnings
 
 def write_card(project, card_root, base_dir="", progress=None):
@@ -366,7 +413,7 @@ def run_gui():
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
 
-    root = tk.Tk(); root.title("Mantis Rally - Radio Studio"); root.geometry("1060x640")
+    root = tk.Tk(); root.title("Mantis Rally - Radio Studio"); root.geometry("1120x780")
     state = {"project": default_project(), "path": None}
 
     top = ttk.Frame(root, padding=6); top.pack(fill="x")
@@ -382,9 +429,9 @@ def run_gui():
 
     mid = ttk.PanedWindow(root, orient="horizontal"); mid.pack(fill="both", expand=True, padx=6)
     left = ttk.Frame(mid); mid.add(left, weight=3)
-    cols = ("station", "kind", "file", "script")
+    cols = ("station", "kind", "biomes", "file", "script")
     tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
-    for c, w in zip(cols, (150, 90, 160, 420)): tree.heading(c, text=c.title()); tree.column(c, width=w, anchor="w")
+    for c, w in zip(cols, (140, 80, 120, 130, 380)): tree.heading(c, text=c.title()); tree.column(c, width=w, anchor="w")
     sb = ttk.Scrollbar(left, orient="vertical", command=tree.yview); tree.configure(yscrollcommand=sb.set)
     tree.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
 
@@ -395,6 +442,19 @@ def run_gui():
     ttk.Label(right, text="Kind").pack(anchor="w", pady=(6, 0))
     kd_box = ttk.Combobox(right, textvariable=kd_var, values=KINDS, state="readonly"); kd_box.pack(fill="x")
     kind_help = ttk.Label(right, text="", foreground="#555", wraplength=360); kind_help.pack(anchor="w", pady=2)
+    # where it plays: none ticked = every biome
+    bfr = ttk.LabelFrame(right, text="Plays in (none ticked: every biome)", padding=4); bfr.pack(fill="x", pady=(6, 0))
+    bvars = [tk.BooleanVar(value=False) for _ in BIOMES]
+    for b, name in enumerate(BIOMES):
+        ttk.Checkbutton(bfr, text=name, variable=bvars[b], command=lambda: commit()).grid(row=b // 3, column=b % 3, sticky="w", padx=2)
+    pfr = ttk.Frame(right); pfr.pack(fill="x", pady=(2, 0))
+    ttk.Label(pfr, text="Presets:").pack(side="left")
+    pre_var = tk.StringVar()
+    pre_box = ttk.Combobox(pfr, textvariable=pre_var, values=[n for n, _ in BIOME_PRESETS], state="readonly", width=18); pre_box.pack(side="left", padx=4)
+    rfr = ttk.Frame(right); rfr.pack(fill="x", pady=(6, 0))
+    ttk.Label(rfr, text="Rate for this line:").pack(side="left")
+    srate_var = tk.StringVar(value="Project")
+    srate_box = ttk.Combobox(rfr, textvariable=srate_var, values=["Project"] + [str(r) for r in RATES], state="readonly", width=8); srate_box.pack(side="left", padx=4)
     ttk.Label(right, text="Script (what to say)").pack(anchor="w", pady=(6, 0))
     script = tk.Text(right, height=6, wrap="word"); script.pack(fill="x")
     file_lbl = ttk.Label(right, text="No recording", wraplength=360); file_lbl.pack(anchor="w", pady=6)
@@ -416,20 +476,21 @@ def run_gui():
     def refresh():
         tree.delete(*tree.get_children())
         for i, s in enumerate(state["project"]["slots"]):
-            tree.insert("", "end", iid=str(i), values=(STATIONS[s["station"]], KINDS[s["kind"]],
-                        os.path.basename(s["file"]) if s["file"] else "-", s["script"].replace("\n", " ")))
+            tree.insert("", "end", iid=str(i), values=row_values(s))
         n = sum(1 for s in state["project"]["slots"] if s["file"])
-        rate = int(rate_var.get())
-        est = 0.0
+        prate = int(rate_var.get())
+        kb = 0.0
         for s in state["project"]["slots"]:
             if s["file"]:
                 try:
                     with wave.open(resolve(s["file"])) as w:
-                        est += w.getnframes() / w.getframerate()
+                        secs = w.getnframes() / w.getframerate()
                 except Exception:
-                    est += 6.0
-        kb = est * rate / 2 / 1024
+                    secs = 6.0
+                kb += secs * 0.8 * slot_rate(s, prate) / 2 / 1024        # (about a fifth goes in the trims)
         budget.config(text="%d of %d recorded, about %.0f KB of %d KB" % (n, len(state["project"]["slots"]), kb, BUDGET_BYTES // 1024))
+    def row_values(s):
+        return (STATIONS[s["station"]], KINDS[s["kind"]], biome_label(s), os.path.basename(s["file"]) if s["file"] else "-", s["script"].replace("\n", " "))
     def current():
         sel = tree.selection(); return int(sel[0]) if sel else None
     def on_select(_=None):
@@ -438,6 +499,10 @@ def run_gui():
         s = state["project"]["slots"][i]
         st_var.set(STATIONS[s["station"]]); kd_var.set(KINDS[s["kind"]])
         kind_help.config(text=KIND_HELP[s["kind"]])
+        bs = set(int(b) for b in (s.get("biomes") or []))
+        for b, v in enumerate(bvars): v.set(b in bs)
+        pre_var.set("")
+        srate_var.set(str(s.get("rate")) if s.get("rate") in RATES else "Project")
         script.delete("1.0", "end"); script.insert("1.0", s["script"])
         file_lbl.config(text=s["file"] or "No recording")
     def commit(_=None):
@@ -447,11 +512,23 @@ def run_gui():
         s["station"] = STATIONS.index(st_var.get()) if st_var.get() in STATIONS else s["station"]
         s["kind"] = KINDS.index(kd_var.get()) if kd_var.get() in KINDS else s["kind"]
         s["script"] = script.get("1.0", "end").strip()
+        s["biomes"] = [b for b, v in enumerate(bvars) if v.get()]
+        s["rate"] = int(srate_var.get()) if srate_var.get().isdigit() else 0
         kind_help.config(text=KIND_HELP[s["kind"]])
-        tree.item(str(i), values=(STATIONS[s["station"]], KINDS[s["kind"]], os.path.basename(s["file"]) if s["file"] else "-", s["script"].replace("\n", " ")))
+        tree.item(str(i), values=row_values(s))
     tree.bind("<<TreeviewSelect>>", on_select)
     st_box.bind("<<ComboboxSelected>>", commit); kd_box.bind("<<ComboboxSelected>>", commit)
     script.bind("<KeyRelease>", commit)
+    def apply_preset(_=None):
+        for name, bs in BIOME_PRESETS:
+            if name == pre_var.get():
+                for b, v in enumerate(bvars): v.set(b in bs)
+        commit(); refresh_budget_only()
+    def refresh_budget_only():
+        i = current(); refresh()
+        if i is not None: tree.selection_set(str(i))
+    pre_box.bind("<<ComboboxSelected>>", apply_preset)
+    srate_box.bind("<<ComboboxSelected>>", lambda e: (commit(), refresh_budget_only()))
     rate_box.bind("<<ComboboxSelected>>", lambda e: (state["project"].__setitem__("rate", int(rate_var.get())), refresh()))
 
     def load_file():
@@ -478,7 +555,7 @@ def run_gui():
         if not s["file"]: return
         try:
             if processed:
-                rate = int(rate_var.get())
+                rate = slot_rate(s, int(rate_var.get()))
                 y, data = build_clip(s, rate, base_dir())
                 y = adpcm_decode(data, len(y))
                 fd, tmp = tempfile.mkstemp(suffix=".wav"); os.close(fd); write_wav(tmp, y, rate)
@@ -489,7 +566,7 @@ def run_gui():
         except Exception as e:
             messagebox.showerror("Radio Studio", str(e))
     def add_slot():
-        state["project"]["slots"].append({"station": 1, "kind": 1, "script": "New line.", "file": ""})
+        state["project"]["slots"].append({"station": 1, "kind": 1, "script": "New line.", "file": "", "biomes": [], "rate": 0})
         refresh(); i = len(state["project"]["slots"]) - 1; tree.selection_set(str(i)); tree.see(str(i)); on_select()
     def remove_slot():
         i = current()

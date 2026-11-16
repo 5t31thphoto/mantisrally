@@ -191,6 +191,7 @@ static Ramp4 artist(const uint8_t* d, const uint8_t* l) {
 static Ramp4 blendR(const Ramp4& a, const Ramp4& b, float t) { Ramp4 r; for (int i = 0; i < 4; i++) r.k[i] = mix(a.k[i], b.k[i], t); return r; }
 
 static float s_night = 0.f, s_lights = 0.f, s_sunK = 1.f;
+static constexpr float HEAD_K = 1.15f;            // the headlights' strength on the ground and on what they light (1: as before)
 static float s_artLit[3] = {1.f, 1.f, 1.f};      // the scene's light on the hero art (photo mode)
 static float s_sunDx = 0.f, s_sunDy = 1.f, s_sunDz = 0.f;
 
@@ -555,21 +556,24 @@ static inline uint8_t groundPix(int x, int y, float wx, float wz, float a, float
     // the difference across that seam drew a stripe every tile (12.8 m near, 32 m, 64 m far)
     if (s_reliefK > 0.f && !(((tv + s_rdv) ^ tv) & ~63) && !(((tu + s_rdu) ^ tu) & ~63))
         s += (float)(n - tex(tu + s_rdu, tv + s_rdv)) * s_reliefK;
-    if (s_lights > 0.02f && z < 75.f) s += s_lights * beamC[x] * 10.f * (z + 3.f <= 11.f ? 1.f : fminf(1.f, 11.f / (z + 3.f))) * (0.35f + 0.65f * s_night);
+    if (s_lights > 0.02f && z < 75.f) s += s_lights * beamC[x] * (10.f * HEAD_K) * (z + 3.f <= 11.f ? 1.f : fminf(1.f, 11.f / (z + 3.f))) * (0.35f + 0.65f * s_night);
     float aa = fabsf(a);
     uint8_t c;
     if (aa < half && mat != MAT_WATER) {
         if (surf == SURF_TARMAC) {
             const float lz = z * 0.55f;
-            const float lw = lz < s_lwNear ? 0.10f : fmaxf(0.10f, lz / F);   // paint never thinner than ~half a pixel
+            // paint never thinner than ~half a pixel (no flicker up close); once widened, it's only a share of those pixels:
+            // past ~30 m the line is drawn as asphalt brightened by that share (it had covered the whole road far off)
+            float lw = 0.10f, cov = 1.f;
+            if (lz >= s_lwNear) { lw = lz / F; cov = 0.10f / lw; }
             int lv = clampi(band(s * 0.9f + 1.f, x, y), 0, 15);
             c = (uint8_t)(P_ROAD + lv);
             if (z < 25.f && tex((int)(wx * 9.f), (int)(wz * 9.f)) > 228) c = (uint8_t)(P_ROAD + clampi(lv + 2, 0, 15));
             float e = fabsf(aa - (half - 0.32f));
             float m = al;
             float sl = s * 0.25f + 0.2f;
-            if (e < lw) c = (uint8_t)(P_LINE_W + clampi((int)sl, 0, 3));
-            else if (aa < lw + 0.05f && m < 4.6f) c = (uint8_t)(P_LINE_Y + clampi((int)sl, 0, 3));
+            if (e < lw) c = cov > 0.6f ? (uint8_t)(P_LINE_W + clampi((int)sl, 0, 3)) : (uint8_t)(P_ROAD + clampi(band(s * 0.9f + 1.f + cov * 9.f, x, y), 0, 15));
+            else if (aa < lw + 0.05f && m < 4.6f) c = cov > 0.6f ? (uint8_t)(P_LINE_Y + clampi((int)sl, 0, 3)) : (uint8_t)(P_ROAD + clampi(band(s * 0.9f + 1.f + cov * 6.f, x, y), 0, 15));
             if (s_wet > 0.25f) refl = true;
         } else if (surf == SURF_SNOW) {
             float rut = fabsf(aa - half * 0.48f);
@@ -1243,7 +1247,7 @@ static float headAt(float lat, float depth) {               // headlight on a pr
     if (s_lights < 0.02f || depth > 70.f) return 0.f;
     float k = lat / depth;
     float c = 1.f - k * k / 0.17f;
-    return c > 0.f ? s_lights * c * fminf(1.f, 14.f / (depth + 4.f)) * s_night : 0.f;
+    return c > 0.f ? s_lights * c * HEAD_K * fminf(1.f, 14.f / (depth + 4.f)) * s_night : 0.f;
 }
 
 static inline float sq(float v) { return v * v; }
@@ -1524,15 +1528,20 @@ static void fillTri(const SV& a, const SV& b, const SV& c, int kind, int shade) 
             int i = y * W + x;
             if (zb[i] <= zc) continue;
             int lv = shade;
+            uint8_t col;
             if (kind == 0) {
-                float pu = (lA * a.uw + lB * b.uw + lC * c.uw) * dep * 3.125f;   // planks 0.32 m wide, across the road
+                // weathered deck planks, 0.32 m wide across the road: sun-silvered grey boards, a brown one here and
+                // there (newer, or oiled), each its own shade, dark gaps between
+                float pu = (lA * a.uw + lB * b.uw + lC * c.uw) * dep * 3.125f;
                 int pi = ifloor(pu); float frc = pu - pi;
-                lv += (pi & 1) ? 0 : 1;
-                if (frc < 0.14f) lv -= 2;                                          // the gap between two planks
-            }
-            fb[i] = fogged(kind == 2 ? (uint8_t)(P_ROCK + clampi(lv + (((x >> 1) ^ (y * 3 >> 2)) & 1), 0, 15))   // rock: a grain
-                         : kind == 3 ? (uint8_t)(P_ROAD + clampi(lv, 0, 15))                                    // concrete
-                                     : (uint8_t)(P_BARK + clampi(lv, 0, 7)), dep, x, y);
+                uint32_t ph = (uint32_t)pi * 0x9E3779B1u; ph ^= ph >> 15;
+                int l2 = lv * 2 + (int)(ph & 3) - 1;
+                if (frc < 0.14f) l2 -= 5;                                          // the gap between two planks
+                col = ((ph >> 4) % 5u == 0u) ? (uint8_t)(P_BARK + clampi(l2 / 2 - 1, 0, 5)) : (uint8_t)(P_ROAD + clampi(l2, 0, 13));
+            } else col = kind == 2 ? (uint8_t)(P_ROCK + clampi(lv + (((x >> 1) ^ (y * 3 >> 2)) & 1), 0, 15))   // rock: a grain
+                       : kind == 3 ? (uint8_t)(P_ROAD + clampi(lv, 0, 15))                                    // concrete
+                                   : (uint8_t)(P_BARK + clampi(lv - 1, 0, 5));                                // timber: dark, oiled
+            fb[i] = fogged(col, dep, x, y);
             zb[i] = zc;
         }
     }
@@ -1581,8 +1590,32 @@ static inline bool roughlyInView(float x, float z, float maxD) {
     float dx = x - cx, dz = z - cz, d = dx * fx + dz * fz, l = dx * rx + dz * rz;
     return d > -12.f && d < maxD && fabsf(l) < fmaxf(d, 0.f) * 1.1f + 20.f;
 }
+// The light a structure gets where it stands, as a share of full sun (1): the land's shadow when it stands within a few
+// metres of the land that's shaded (a deck high over a shaded gorge stays in the sun), and the clouds' shadows. Set
+// before drawing each piece; the timber, deck and rock shades take it.
+static float s_structK = 1.f;
+static void structLightAt(float x, float y, float z) {
+    float k = 1.f;
+    const Grid* gp = nullptr;
+    const Grid& gN = terrainNear(); const Grid& gF = terrainFar();
+    for (int q = 0; q < 2 && !gp; q++) {
+        const Grid& g = q ? gF : gN;
+        if (!g.c) continue;
+        int i = (int)floorf(x * g.inv + 0.5f), j = (int)floorf(z * g.inv + 0.5f);
+        if (i < g.ox || j < g.oz || i >= g.ox + g.N || j >= g.oz + g.N) continue;
+        gp = &g;
+        const int idx = gridWrap(j, g.N) * g.N + gridWrap(i, g.N);
+        if (g.sh && ((g.sh[idx >> 3] >> (idx & 7)) & 1)) {             // the land here is out of the sun
+            const float above = y - g.c[idx].h * 0.1f;
+            const float sh = s_lightSh[0x88] / fmaxf(s_light[0x88], 0.05f);
+            k = sh + (1.f - sh) * clampf((above - 3.f) * (1.f / 6.f), 0.f, 1.f);
+        }
+    }
+    if (s_cloudAmt > 0.f) k *= cloudK(x, z);
+    s_structK = k;
+}
 static inline int timberShade(float nx, float nz) {  // a vertical timber face lit by the sun (the deck's top: flat light)
-    float lt = 0.22f + 0.62f * fmaxf(0.f, nx * s_sunDx + nz * s_sunDz) * s_sunK;
+    float lt = 0.22f + 0.62f * fmaxf(0.f, nx * s_sunDx + nz * s_sunDz) * s_sunK * s_structK;
     return clampi((int)(lt * 8.f) - 1, 0, 5);
 }
 static void drawDeckSeg(const RoadNode& a, const RoadNode& b, bool river) {
@@ -1590,17 +1623,18 @@ static void drawDeckSeg(const RoadNode& a, const RoadNode& b, bool river) {
     const float ha = a.half20 * 0.05f + 1.3f, hb = b.half20 * 0.05f + 1.3f;   // the road and its shoulders: what the wheels ride
     const float pax = -sinf(a.yaw), paz = cosf(a.yaw), pbx = -sinf(b.yaw), pbz = cosf(b.yaw);
     const float ya = a.y + 0.13f, yb = b.y + 0.13f;                  // just above the road's crown at the abutments
+    structLightAt((a.x + b.x) * 0.5f, (ya + yb) * 0.5f, (a.z + b.z) * 0.5f);
     CV top[4] = { camPt(a.x + pax * ha, ya, a.z + paz * ha, a.s), camPt(b.x + pbx * hb, yb, b.z + pbz * hb, b.s),
                   camPt(b.x - pbx * hb, yb, b.z - pbz * hb, b.s), camPt(a.x - pax * ha, ya, a.z - paz * ha, a.s) };
-    if (river) fillPoly(top, 4, 3, clampi((int)(s_light[0x88] * 12.f), 2, 12));      // a river bridge: a concrete deck
-    else fillPoly(top, 4, 0, clampi((int)(s_light[0x88] * 8.f), 1, 6));
+    if (river) fillPoly(top, 4, 3, clampi((int)(s_light[0x88] * s_structK * 12.f), 2, 12));      // a river bridge: a concrete deck
+    else fillPoly(top, 4, 0, clampi((int)(s_light[0x88] * s_structK * 6.f), 1, 6));            // weathered planks
     for (int e = -1; e <= 1; e += 2) {                 // the stringer along each side, and the rail
         float qax = a.x + pax * ha * e, qaz = a.z + paz * ha * e, qbx = b.x + pbx * hb * e, qbz = b.z + pbz * hb * e;
         CV side[4] = { camPt(qax, ya, qaz, 0.f), camPt(qbx, yb, qbz, 0.f), camPt(qbx, yb - 0.7f, qbz, 0.f), camPt(qax, ya - 0.7f, qaz, 0.f) };
         int sh = timberShade(pax * e, paz * e);
         if (river) { fillPoly(side, 4, 3, sh * 2 + 2); continue; }      // (its truss is its rail: drawRiverTruss)
         fillPoly(side, 4, 1, sh);
-        line3(qax, ya + 0.95f, qaz, qbx, yb + 0.95f, qbz, (uint8_t)(P_BARK + clampi(sh + 2, 0, 7)), 1);
+        line3(qax, ya + 0.95f, qaz, qbx, yb + 0.95f, qbz, (uint8_t)(P_BARK + clampi(sh, 0, 5)), 1);   // the rail: dark timber
     }
 }
 static void drawBent(const RoadNode& n, bool river) {  // the trestle's legs at this node, braced when tall (a river bridge: concrete piers)
@@ -1623,6 +1657,7 @@ static void drawBent(const RoadNode& n, bool river) {  // the trestle's legs at 
     float d = (n.x - cx) * fx + (n.z - cz) * fz;
     if (river) {                                       // a pier every 15 m: two round columns and a cap beam
         if (((int)floorf(n.s / ROAD_DS + 0.5f)) % 5) return;
+        structLightAt(n.x, (top + fminf(gy[0], gy[1])) * 0.5f, n.z);
         int tp = clampi((int)(1.1f * F / fmaxf(d, 1.f)), 1, 14);
         int sh = timberShade(px, pz);
         uint8_t c = (uint8_t)(P_ROAD + clampi(sh * 2 + 3, 0, 15)), c2 = (uint8_t)(P_ROAD + clampi(sh * 2 + 1, 0, 15));
@@ -1631,8 +1666,9 @@ static void drawBent(const RoadNode& n, bool river) {  // the trestle's legs at 
         return;
     }
     int thick = clampi((int)(0.28f * F / fmaxf(d, 1.f)), 1, 5);
+    structLightAt(n.x, (top + fminf(gy[0], gy[1])) * 0.5f, n.z);
     int sh = timberShade(px, pz);
-    uint8_t c = (uint8_t)(P_BARK + sh), c2 = (uint8_t)(P_BARK + clampi(sh - 1, 0, 7));
+    uint8_t c = (uint8_t)(P_BARK + clampi(sh - 1, 0, 5)), c2 = (uint8_t)(P_BARK + clampi(sh - 2, 0, 5));   // creosoted: dark
     for (int e = 0; e < 2; e++) if (top - gy[e] > 0.3f) line3(lx[e], top, lz[e], lx[e], gy[e] - 0.2f, lz[e], c, thick);
     if (tall > 2.5f) {                                 // a cross-tie and an X brace
         float low = fmaxf(gy[0], gy[1]) + 0.3f;
@@ -1706,7 +1742,7 @@ static void drawTunnelSeg(const RoadNode& a, const RoadNode& b, int k) {
     const float ha = a.half20 * 0.05f + 1.6f, hb = b.half20 * 0.05f + 1.6f, WH = 4.6f, RH = 6.6f;
     const float pax = -sinf(a.yaw), paz = cosf(a.yaw), pbx = -sinf(b.yaw), pbz = cosf(b.yaw);
     auto P = [&](const RoadNode& n, float px, float pz, float hf, float acr, float up) { return camPt(n.x + px * hf * acr, n.y + up, n.z + pz * hf * acr, 0.f); };
-    const float lt = s_light[0x88];
+    const float lt = s_light[0x88] * 0.6f;                                   // inside: little of the day reaches
     const int wall = clampi((int)(lt * 5.f) + 2, 2, 7), roof = clampi((int)(lt * 3.f) + 1, 1, 5);
     for (int e = -1; e <= 1; e += 2) {
         CV w[4] = { P(a, pax, paz, ha, e, -0.3f), P(b, pbx, pbz, hb, e, -0.3f), P(b, pbx, pbz, hb, e, WH), P(a, pax, paz, ha, e, WH) };
@@ -1718,24 +1754,46 @@ static void drawTunnelSeg(const RoadNode& a, const RoadNode& b, int k) {
     fillPoly(c, 4, 3, roof);                                               // the crown
     if ((k & 3) == 0) line3(a.x, a.y + RH - 0.1f, a.z, b.x * 0.4f + a.x * 0.6f, b.y * 0.4f + a.y * 0.6f + RH - 0.1f, b.z * 0.4f + a.z * 0.6f, P_WINDOW, 2);   // a lamp
 }
+// A portal: the mountain's own face round the bore, not a wall. The face follows the ridge's skyline across the cut
+// (the natural land's height at each point across, a little jagged), leans back into the hill as it rises, and is
+// broken into rock buttresses of their own shades; a concrete collar rings the bore.
 static void drawPortal(const RoadNode& n, bool backward) {
     if (!roughlyInView(n.x, n.z, 300.f)) return;
     const float hf = n.half20 * 0.05f + 1.6f, RH = 6.6f, WW = hf + 14.f;
     const float px = -sinf(n.yaw), pz = cosf(n.yaw);
-    float top = fmaxf(terrainNatural(n.x, n.z) - n.y, RH + 3.f) + 1.f;
-    auto P = [&](float acr, float up) { return camPt(n.x + px * acr, n.y + up, n.z + pz * acr, 0.f); };
-    const float fxn = cosf(n.yaw) * (backward ? 1.f : -1.f), fzn = sinf(n.yaw) * (backward ? 1.f : -1.f);   // the face's outward normal
-    const int sh = clampi((int)((0.35f + 0.65f * fmaxf(0.f, fxn * s_sunDx + fzn * s_sunDz) * s_sunK) * s_light[0x88] * 14.f), 1, 13);
-    CV l[4] = { P(-WW, -2.f), P(-hf, -2.f), P(-hf, top), P(-WW, top) };
-    CV r[4] = { P(hf, -2.f), P(WW, -2.f), P(WW, top), P(hf, top) };
-    CV m[4] = { P(-hf, RH), P(hf, RH), P(hf, top), P(-hf, top) };
-    CV ql[3] = { P(-hf, 4.6f), P(-hf * 0.55f, RH), P(-hf, RH) }, qr[3] = { P(hf, 4.6f), P(hf, RH), P(hf * 0.55f, RH) };
-    fillPoly(l, 4, 2, sh); fillPoly(r, 4, 2, sh); fillPoly(m, 4, 2, sh);
-    fillPoly(ql, 3, 2, sh); fillPoly(qr, 3, 2, sh);
-    const uint8_t rim = (uint8_t)(P_ROAD + clampi(sh + 2, 0, 15));        // the concrete ring round the bore
-    line3(n.x - px * hf, n.y - 0.3f, n.z - pz * hf, n.x - px * hf, n.y + 4.6f, n.z - pz * hf, rim, 2);
-    line3(n.x + px * hf, n.y - 0.3f, n.z + pz * hf, n.x + px * hf, n.y + 4.6f, n.z + pz * hf, rim, 2);
-    line3(n.x - px * hf * 0.55f, n.y + RH, n.z - pz * hf * 0.55f, n.x + px * hf * 0.55f, n.y + RH, n.z + pz * hf * 0.55f, rim, 2);
+    const float ox = cosf(n.yaw) * (backward ? 1.f : -1.f), oz = sinf(n.yaw) * (backward ? 1.f : -1.f);   // the face's outward normal
+    structLightAt(n.x, n.y + RH, n.z);
+    const int base = clampi((int)((0.3f + 0.7f * fmaxf(0.f, ox * s_sunDx + oz * s_sunDz) * s_sunK * s_structK) * s_light[0x88] * 13.f), 1, 12);
+    static const float XS[11] = {-1.f, -0.78f, -0.56f, -0.30f, -0.15f, 0.f, 0.15f, 0.30f, 0.56f, 0.78f, 1.f};
+    float xs[11], tp[11];
+    const uint32_t sd = hash32((uint32_t)(n.x * 3.f) ^ (uint32_t)(n.z * 7.f));
+    for (int k = 0; k < 11; k++) {
+        // across: the outer buttresses out to the cut's walls, the inner ones meeting the bore's edges exactly
+        float u = XS[k];
+        xs[k] = fabsf(u) <= 0.15f ? u / 0.15f * hf * 0.55f : (fabsf(u) <= 0.30f ? (u < 0.f ? -hf : hf) : (u < 0.f ? -1.f : 1.f) * (hf + (fabsf(u) - 0.30f) / 0.70f * (WW - hf)));
+        const float wx = n.x + px * xs[k], wz = n.z + pz * xs[k];
+        const float jag = (k == 0 || k == 10) ? 0.f : (hashf(sd + k * 13u) - 0.5f) * 1.6f;
+        tp[k] = fmaxf(RH + 1.4f, terrainNatural(wx, wz) - n.y + 0.4f + jag);
+    }
+    auto bot = [&](float x) { float a = fabsf(x); return a >= hf ? -2.f : (a < 0.55f * hf ? RH : 4.6f + 2.f * (hf - a) / (0.45f * hf)); };
+    auto P = [&](float acr, float up, float hTop) {                      // leaning back into the hill: a quarter of its height
+        const float lean = up > RH ? (up - RH) * 0.25f : 0.f; (void)hTop;
+        return camPt(n.x + px * acr - ox * lean, n.y + up, n.z + pz * acr - oz * lean, 0.f);
+    };
+    for (int k = 0; k < 10; k++) {
+        const float x0 = xs[k], x1 = xs[k + 1];
+        CV q[4] = { P(x0, bot(x0), tp[k]), P(x1, bot(x1), tp[k + 1]), P(x1, tp[k + 1], tp[k + 1]), P(x0, tp[k], tp[k]) };
+        const int sh = clampi(base + (int)(hashf(sd + 97u + k * 31u) * 3.f) - 1, 1, 13);   // each buttress its own shade
+        fillPoly(q, 4, 2, sh);
+    }
+    // the collar: a concrete ring standing proud of the face
+    const uint8_t rim = (uint8_t)(P_ROAD + clampi(base + 3, 0, 15)), rim2 = (uint8_t)(P_ROAD + clampi(base + 1, 0, 15));
+    const float fo = 0.35f;                                                  // proud of the face
+    for (int e = -1; e <= 1; e += 2) {
+        line3(n.x + px * hf * e + ox * fo, n.y - 0.3f, n.z + pz * hf * e + oz * fo, n.x + px * hf * e + ox * fo, n.y + 4.6f, n.z + pz * hf * e + oz * fo, rim, 2);
+        line3(n.x + px * hf * e + ox * fo, n.y + 4.6f, n.z + pz * hf * e + oz * fo, n.x + px * hf * 0.55f * e + ox * fo, n.y + RH, n.z + pz * hf * 0.55f * e + oz * fo, rim, 2);
+    }
+    line3(n.x - px * hf * 0.55f + ox * fo, n.y + RH, n.z - pz * hf * 0.55f + oz * fo, n.x + px * hf * 0.55f + ox * fo, n.y + RH, n.z + pz * hf * 0.55f + oz * fo, rim2, 2);
 }
 
 static void structuresOn(bool arm, int lo, int hi) {
@@ -1876,6 +1934,7 @@ static void drawRamps() {
         if (!terrainRamp(li, lj, r, false) || !roughlyInView(r.x, r.z, R) || sq(r.x - cx) + sq(r.z - cz) > R * R) continue;
         if (!terrainRamp(li, lj, r, true)) continue;
         const float sxn = -r.uz, szn = r.ux;                            // across the ramp
+        structLightAt(r.x, terrainHeight(r.x, r.z) + 1.f, r.z);
         const float d = sqrtf(sq(r.x - cx) + sq(r.z - cz));
         const int th = d < 20.f ? 2 : 1;
         const uint8_t c = (uint8_t)(P_BARK + clampi((int)(s_light[0x88] * 6.f), 1, 5)), c2 = (uint8_t)(P_BARK + clampi((int)(s_light[0x88] * 6.f) + 1, 1, 6));
@@ -1886,7 +1945,7 @@ static void drawRamps() {
         const float yLip = yFoot + (yPast - yFoot) * (11.f / 14.f) + 3.f, yLipG = yLip - 3.f;
         CV dk[4] = { camPt(sx0 - sxn * 2.4f, yFoot + 0.05f, sz0 - szn * 2.4f, 0.f), camPt(r.x - sxn * 2.4f, yLip, r.z - szn * 2.4f, 11.f),
                      camPt(r.x + sxn * 2.4f, yLip, r.z + szn * 2.4f, 11.f), camPt(sx0 + sxn * 2.4f, yFoot + 0.05f, sz0 + szn * 2.4f, 0.f) };
-        fillPoly(dk, 4, 0, clampi((int)(s_light[0x88] * 8.f), 1, 6));
+        fillPoly(dk, 4, 0, clampi((int)(s_light[0x88] * s_structK * 6.f), 1, 6));
         for (int e = -1; e <= 1; e += 2) {
             const float ox = sxn * 2.45f * e, oz = szn * 2.45f * e;
             CV sd[3] = { camPt(sx0 + ox, yFoot, sz0 + oz, 0.f), camPt(r.x + ox, yLip, r.z + oz, 0.f), camPt(r.x + ox, yLipG - 0.3f, r.z + oz, 0.f) };
@@ -1896,10 +1955,12 @@ static void drawRamps() {
         }
         line3(r.x - sxn * 2.45f, yLip + 0.1f, r.z - szn * 2.45f, r.x + sxn * 2.45f, yLip + 0.1f, r.z + szn * 2.45f, c2, th);   // the lip
     }
+    s_structK = 1.f;
 }
 
 extern float g_riverNear;                            // the river's sound level (audio)
 static void drawRoadStructures() {
+    s_structK = 1.f;
     g_riverNear = clampf(1.f - terrainRiverDist(cx, cz) * (1.f / 160.f), 0.f, 1.f);
     int n = roadCount();
     if (n > 1) {
@@ -1960,6 +2021,34 @@ static void drawParticles() {
 }
 
 // ================================================================================== reflections, weather
+// Wet tarmac: the reflection is seen through the water film, in the road's own grey (its brightness, as a level of the
+// road's ramp), and how much of it comes through follows Fresnel: a little looking down at the road, a lot toward the
+// horizon where the view skims the water. The curve is cheated a little (a cube, not Schlick's fifth power: it comes
+// up sooner) and stops short of a full mirror.
+static constexpr float WET_SHEEN = 0.30f;     // how much comes through looking straight down
+static constexpr float WET_MIRROR = 0.85f;    // ... and skimming the surface (the top of the curve)
+static uint8_t s_lumLv[256];                  // each palette entry's brightness as a level of the road's ramp
+static float s_fresK[256];                    // the Fresnel curve by rows below the horizon (this frame's focal length)
+static void buildWetTables() {
+    static uint8_t tick = 0;
+    if (!(tick++ & 7)) {                                     // the palette drifts slowly: every 8th frame is plenty
+        float rl[16];
+        for (int k = 0; k < 16; k++) { const uint8_t* p = palRGB + (P_ROAD + k) * 3; rl[k] = 0.3f * p[0] + 0.59f * p[1] + 0.11f * p[2]; }
+        for (int i = 0; i < 256; i++) {
+            const uint8_t* p = palRGB + i * 3;
+            const float l = 0.3f * p[0] + 0.59f * p[1] + 0.11f * p[2];
+            int b = 0; float bd = 1e9f;
+            for (int k = 0; k < 16; k++) { float d = fabsf(l - rl[k]); if (d < bd) { bd = d; b = k; } }
+            s_lumLv[i] = (uint8_t)b;
+        }
+    }
+    for (int dy = 0; dy < 256; dy++) {
+        const float c = dy / sqrtf(F * F + (float)(dy * dy));     // the cosine of the angle of incidence
+        const float m = 1.f - c;
+        s_fresK[dy] = WET_SHEEN + (WET_MIRROR - WET_SHEEN) * m * m * m;
+    }
+}
+
 MR_HOT static void reflectPass() {
     const float t = s_t;
     for (int x = 0; x < W; x++) {
@@ -1978,6 +2067,15 @@ MR_HOT static void reflectPass() {
             // lakes keep the screen dither they were approved with; only wet road and mud use the surface's own grain
             float gp = (water || !s_gpat) ? dith(x, y) : s_gpat[i] * (1.f / 255.f);
             if (water) fb[i] = (fres > gp) ? r : cur;
+            else if (cur >= P_ROAD && cur < P_ROAD + 16) {           // wet tarmac (above)
+                int dy = (int)(y - horX[x]); dy = dy < 0 ? 0 : (dy > 255 ? 255 : dy);
+                const float a = s_wet * s_fresK[dy];
+                if ((a - 0.6f * s_wet) * 4.f > gp) fb[i] = r;       // skimming (the top of the curve): a mirror, in its own colours
+                else {
+                    const float lv = (float)(cur - P_ROAD) + ((float)s_lumLv[r] - (float)(cur - P_ROAD)) * a;
+                    fb[i] = (uint8_t)(P_ROAD + clampi((int)(lv + gp), 0, 15));
+                }
+            }
             else if (s_wet * 0.55f * fres > gp) fb[i] = r;
         }
     }
@@ -2514,6 +2612,8 @@ void renderInit() {
     memset(fb, 0, sizeof(fb));
 }
 
+void (*g_renderTick)() = nullptr;
+static inline void renderTick() { if (g_renderTick) g_renderTick(); }
 void renderFrame() {
     s_mistOn = (S.mist * 0.4f + g_scene.mist + g_scene.fog * 0.35f) >= 0.04f;
     if (!s_rankMade && s_tex) makeTexRank();
@@ -2560,6 +2660,7 @@ void renderFrame() {
     else memcpy(s_bottom, s_bottomCock, sizeof(s_bottom));
     memset(zb, 255, W * H);
     drawTerrain(560.f);
+    renderTick();
     drawSkyAndPanorama();
     drawNight();
     drawSun();
@@ -2568,6 +2669,7 @@ void renderFrame() {
     drawBirds();
     drawRoadStructures();
     drawVegetation();
+    renderTick();
     drawFarm();
     drawArches();
     drawGeysers();
@@ -2575,6 +2677,8 @@ void renderFrame() {
     drawSignAndStore();
     drawCritters();
     drawParticles();
+    renderTick();
+    if (s_wet > 0.f) buildWetTables();
     reflectPass();
     drawGlint();
     drawFireflies();
@@ -2588,6 +2692,7 @@ void renderFrame() {
     drawWipers();                                   // before the dash, which hides their pivots
     if (g_view.view == VIEW_COCKPIT) drawCockpit();
     drawGlass();
+    renderTick();
     drawHud();
     s_bob = 0.f;
     s_frameN++;

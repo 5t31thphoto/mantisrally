@@ -47,6 +47,11 @@ static float s_sqG = 0.f, s_gravG = 0.f, s_windG = 0.f, s_roadG = 0.f, s_washG =
 // one-shots
 struct Thump { float t, hz, amp, len; uint32_t ph; };
 static Thump s_th[3];
+// decks underfoot: timber planks clatter (each plank's edge under the tyres, a hollow boom under them) and knock at
+// every bent; a concrete bridge rolls smooth and goes ka-thunk at each expansion joint (front axle, then rear)
+static float s_plankPh = 0.f, s_plankE = 0.f, s_deckDist = 0.f, s_rearJointT = -1.f, s_rearJointA = 0.f;
+static dsp::SVF s_plankBP, s_plankBoom;
+static void thump(float hz, float amp, float len) { for (Thump& t : s_th) if (t.t >= t.len) { t.t = 0.f; t.hz = hz; t.amp = amp; t.len = len; t.ph = 0; break; } }
 static float s_crackE = 0.f, s_crackA = 0.f; static dsp::SVF s_crack;
 static float s_hornT = 0.f; static uint32_t s_hornPh1 = 0, s_hornPh2 = 0; static dsp::SVF s_hornF;
 // the clutch: a gear change cuts the engine's load for a moment, then it bites again
@@ -258,7 +263,23 @@ void engineBlock(Bus& b, int n) {
     float dingRate = (c.surf == SURF_GRAVEL ? 2.2f : (c.surf == SURF_DIRT ? 0.7f : 0.f)) * clampf(speed / 15.f, 0.f, 1.5f) * (c.air ? 0.f : 1.f);
     s_cabin.set(c.cockpit ? 1500.f : 2600.f, 0.7f);
     s_bodyA.set(185.f, 2.f); s_bodyB.set(430.f, 2.5f);
-    float roadT = (c.air ? 0.f : clampf(speed / 30.f, 0.f, 1.f)) * (tar ? 0.05f : (c.surf == SURF_MUD ? 0.06f : 0.055f));
+    // decks: the joints (per block: a joint is never closer than a block apart at any speed we reach)
+    const uint8_t deck = c.air ? 0 : c.deck;
+    if (deck) {
+        const float span = deck == 1 ? 3.f : 15.f;                                  // a bent's spacing, a joint's
+        const float before = s_deckDist;
+        s_deckDist += speed * dtb;
+        if (floorf(s_deckDist / span) != floorf(before / span) && speed > 1.f) {
+            const float a = clampf(speed / 25.f, 0.25f, 1.f);
+            if (deck == 1) thump(85.f, 0.16f * a, 0.08f);                            // a knock at the bent
+            else thump(70.f, 0.26f * a, 0.11f);                                     // ka-
+            s_rearJointT = 2.6f / fmaxf(speed, 1.f); s_rearJointA = a;              // ... -thunk: the rear axle (~ wheelbase)
+        }
+        if (s_rearJointT >= 0.f) { s_rearJointT -= dtb; if (s_rearJointT < 0.f) thump(deck == 1 ? 80.f : 62.f, (deck == 1 ? 0.13f : 0.22f) * s_rearJointA, deck == 1 ? 0.08f : 0.12f); }
+    } else s_deckDist = 0.f;
+    const float plankRate = deck == 1 ? speed / 0.32f : 0.f;                         // planks 0.32 m wide
+    s_plankBP.set(340.f, 2.2f); s_plankBoom.set(120.f, 1.4f);
+    float roadT = (c.air ? 0.f : clampf(speed / 30.f, 0.f, 1.f)) * (tar ? 0.05f : (c.surf == SURF_MUD ? 0.06f : 0.055f)) * (deck == 2 ? 0.6f : 1.f);
     s_roadG += (roadT - s_roadG) * clampf(dtb * 8.f, 0.f, 1.f);
     s_road.set(c.surf == SURF_MUD ? 260.f : (tar ? 420.f : 650.f), 0.7f);
     float wk = clampf(speed / 45.f, 0.f, 1.2f);
@@ -384,6 +405,13 @@ void engineBlock(Bus& b, int n) {
         if (g_sndVariant & 8) gs = gs * 0.15f + s_bodyA.bp(gs) * 0.7f + s_bodyB.bp(gs) * 0.55f;   // one body under it all (level-matched)
         tyre += s_cabin.lp(gs);                                                       // through the body
         tyre += s_road.lp(nz) * s_roadG;
+        if (plankRate > 0.f) {                                                         // the planks under the tyres
+            s_plankPh += plankRate * (1.f / dsp::SR);
+            if (s_plankPh >= 1.f) { s_plankPh -= 1.f; s_plankE = 0.55f + rng.uni() * 0.45f; }
+            const float hit = s_plankE * nz;
+            tyre += (s_plankBP.bp(hit) * 0.05f + s_plankBoom.lp(hit) * 0.07f) * clampf(speed / 12.f, 0.f, 1.f);
+            s_plankE *= 0.9965f;
+        }
         float wind = s_wind.bp(s_pink.tick(nz)) * s_windG;
         float wash = s_washG > 0.002f ? s_wash.lp(nz) * s_washG : 0.f;
         // ---- one-shots ----
