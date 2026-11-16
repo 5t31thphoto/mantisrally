@@ -11,10 +11,10 @@
 
 namespace mantis {
 
-static bool s_open = false, s_dirty = true;
+static bool s_open = false, s_dirty = true, s_tune = false;   // s_tune: the tuning shop page
 static int s_msgT = 0; static char s_msg[40];
 
-void storeOpen() { s_open = true; s_dirty = true; s_msg[0] = 0; }
+void storeOpen() { s_open = true; s_dirty = true; s_tune = false; s_msg[0] = 0; }
 bool storeActive() { return s_open; }
 
 static void rect(uint16_t* b, int x, int y, int w, int h, uint16_t c) {
@@ -52,9 +52,44 @@ static void drawSide(uint16_t* b, int v, int cx, int baseY) {
 
 // layout (overlay pixels)
 struct Btn { int x, y, w, h; };
-static const Btn BUY = {182, 150, 124, 30}, DRIVE = {182, 196, 124, 30}, OFFR = {14, 196, 156, 30};
+static const Btn BUY = {182, 150, 60, 30}, TUNE = {246, 150, 60, 30}, DRIVE = {182, 196, 124, 30}, OFFR = {14, 196, 156, 30},
+                 BACK = {14, 196, 156, 30};
+static Btn upgBtn(int k) { Btn u = {230, 46 + k * 40, 76, 30}; return u; }
 static Btn garageBtn(int i) { Btn g = {14 + i * 40, 154, 36, 30}; return g; }
 static bool hit(const Btn& b, int x, int y) { return x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h; }
+
+static void drawTune(uint16_t* b) {
+    const uint16_t panel = rgb565(18, 26, 38), lime = rgb565(150, 255, 70), white = rgb565(240, 244, 250),
+                   amber = rgb565(255, 190, 50), grey = rgb565(90, 96, 110), teal = rgb565(0, 200, 180);
+    char t[48];
+    snprintf(t, sizeof t, "TUNING THE %s", vehicleSpec(g_prog.current).shortName);
+    text(b, 14, 32, t, white, 1);
+    snprintf(t, sizeof t, "STYLE %u", (unsigned)g_prog.style);
+    text(b, 306 - uiTextWidth(t, 1), 32, t, lime, 1);
+    static const char* NAME[UPG_N] = {"HANDLING", "GRIP", "POWER"};
+    static const char* WHAT[UPG_N] = {"SHARPER STEERING", "MORE TYRE BITE", "MORE TORQUE"};
+    for (int k = 0; k < UPG_N; k++) {
+        Btn u = upgBtn(k);
+        rect(b, 12, u.y - 2, 296, 34, panel);
+        text(b, 18, u.y + 2, NAME[k], white, 1);
+        text(b, 18, u.y + 13, WHAT[k], grey, 1);
+        int lv = progressUpgradeLevel(k);
+        for (int p = 0; p < 3; p++) rect(b, 176 + p * 12, u.y + 3, 9, 6, p < lv ? teal : rgb565(40, 46, 60));
+        int c = progressUpgradeCost(k);
+        if (c > 0) {
+            snprintf(t, sizeof t, "%d", c);
+            text(b, 176, u.y + 13, t, amber, 1);
+            bool can = g_prog.style >= (uint32_t)c;
+            rect(b, u.x, u.y, u.w, u.h, can ? rgb565(30, 120, 60) : rgb565(50, 54, 62));
+            textC(b, u.x + u.w / 2, u.y + 11, "UPGRADE", can ? white : grey, 1);
+        } else {
+            text(b, 176, u.y + 13, "MAXED", lime, 1);
+        }
+    }
+    textC(b, 160, 168, "EARN STYLE WITH AIRTIME AND DRIFTS", amber, 1);
+    rect(b, BACK.x, BACK.y, BACK.w, BACK.h, rgb565(36, 42, 56));
+    textC(b, BACK.x + BACK.w / 2, BACK.y + 8, "BACK", white, 2);
+}
 
 static void draw() {
     uint16_t* b = overlayBuffer();
@@ -64,6 +99,14 @@ static void draw() {
     rect(b, 0, 0, 320, 240, bg);
     frame(b, 4, 4, 312, 232, teal);
     textC(b, 160, 10, "$ MANTIS MOTORS $", lime, 2);
+    if (s_tune) {
+        drawTune(b);
+        rect(b, DRIVE.x, DRIVE.y, DRIVE.w, DRIVE.h, rgb565(0, 100, 130));
+        textC(b, DRIVE.x + DRIVE.w / 2, DRIVE.y + 8, "DRIVE ON", white, 2);
+        if (s_msg[0]) textC(b, 160, 180, s_msg, lime, 1);
+        overlayEnable(true);
+        return;
+    }
     int nxt = progressNextLocked();
     if (nxt >= 0) {
         const VehicleSpec& S = vehicleSpec((uint8_t)nxt);
@@ -92,6 +135,9 @@ static void draw() {
         textC(b, 160, 70, "YOU OWN EVERY VEHICLE", lime, 1);
         textC(b, 160, 86, "THE WORLD IS YOURS", white, 1);
     }
+    rect(b, TUNE.x, TUNE.y, TUNE.w, TUNE.h, rgb565(120, 60, 140));      // the tuning shop
+    textC(b, TUNE.x + TUNE.w / 2, TUNE.y + 8, "TUNE", white, 2);
+    {   char st[24]; snprintf(st, sizeof st, "STYLE %u", (unsigned)g_prog.style); text(b, 70, 146, st, lime, 1); }
     // garage
     text(b, 14, 146, "GARAGE", grey, 1);
     for (int v = 0; v < V_COUNT; v++) {
@@ -113,6 +159,18 @@ static void draw() {
 bool storeUpdate(bool tap, int tx, int ty, bool& changed) {
     changed = false;
     if (!s_open) return false;
+    if (tap && s_tune) {
+        static const char* NAME[UPG_N] = {"HANDLING", "GRIP", "POWER"};
+        for (int k = 0; k < UPG_N; k++)
+            if (hit(upgBtn(k), tx, ty) && progressBuyUpgrade(k)) { changed = true; snprintf(s_msg, sizeof s_msg, "%s UP TO LEVEL %d", NAME[k], progressUpgradeLevel(k)); }
+        if (hit(BACK, tx, ty)) { s_tune = false; s_msg[0] = 0; }
+        if (hit(DRIVE, tx, ty)) { s_open = false; overlayEnable(false); return false; }
+        s_dirty = true;
+        tap = false;
+    }
+    if (tap) {
+        if (hit(TUNE, tx, ty)) { s_tune = true; s_msg[0] = 0; s_dirty = true; tap = false; }
+    }
     if (tap) {
         int nxt = progressNextLocked();
         if (nxt >= 0 && hit(BUY, tx, ty) && progressBuy(nxt)) { changed = true; snprintf(s_msg, sizeof s_msg, "SOLD! ENJOY THE %s", vehicleSpec((uint8_t)nxt).shortName); }

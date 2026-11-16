@@ -401,7 +401,12 @@ static void setupCamera() {
         float c = cosf(v.yaw), s = sinf(v.yaw);
         cx = v.x + c * V.eyeBack; cz = v.z + s * V.eyeBack;
         cy = v.groundY + V.eyeHeight + v.bounce * 0.6f;
-        F = v.view == VIEW_COCKPIT ? 92.f : 96.f;
+        // speed perspective: the view opens up to 13% wider between 45 and 120 mph (smoothed): speed you can feel
+        {   static float s_fovK = 1.f;
+            const float tgt = 1.f - 0.13f * clampf((v.speedMph - 45.f) * (1.f / 75.f), 0.f, 1.f);
+            s_fovK += (tgt - s_fovK) * clampf(g_scene.dt * 2.5f, 0.f, 1.f);
+            F = (v.view == VIEW_COCKPIT ? 92.f : 96.f) * s_fovK;
+        }
         pitch = v.pitch * 0.75f - 0.05f;
         roll = V.bike ? v.lean * 0.45f + v.roll * 0.3f : v.roll * 0.6f;
         hor0 = H * 0.47f + tanf(pitch) * F;
@@ -456,6 +461,21 @@ static bool s_mistOn = false;                     // the mist band will read the
 // near samples (lite = false) blend road distance and light; distant ones (lite = true) take them from the nearest cell.
 struct Probe { const Cell *a, *b, *c, *d; const Grid* g; float tx, tz, h; bool lite; };
 // a cell's light: the sun's, or the sky's only where the land shades it from the sun
+// Cloud shadows: a soft blob map (32 x 32, 70 m a cell, wrapping both ways: no seams) drifting with the wind. Only on
+// part-cloudy sunny days, and gently: at most ~16% off the light.
+static uint8_t s_cloudMap[32 * 32];
+static float s_cloudOx = 0.f, s_cloudOz = 0.f, s_cloudThr = 999.f, s_cloudAmt = 0.f;
+static inline __attribute__((always_inline)) float cloudK(float x, float z) {
+    const float u = (x + s_cloudOx) * (1.f / 70.f), v = (z + s_cloudOz) * (1.f / 70.f);
+    const int iu = ifloor(u), iv = ifloor(v);
+    float tu = u - iu, tv = v - iv;
+    tu = tu * tu * (3.f - 2.f * tu); tv = tv * tv * (3.f - 2.f * tv);
+    const int x0 = iu & 31, x1 = (iu + 1) & 31, z0 = (iv & 31) << 5, z1 = ((iv + 1) & 31) << 5;
+    const float a = s_cloudMap[z0 | x0], b = s_cloudMap[z0 | x1], c = s_cloudMap[z1 | x0], d = s_cloudMap[z1 | x1];
+    const float ab = a + (b - a) * tu, cd = c + (d - c) * tu;
+    const float sh = clampf((ab + (cd - ab) * tv - s_cloudThr) * (1.f / 40.f), 0.f, 1.f);
+    return 1.f - s_cloudAmt * sh;
+}
 static inline __attribute__((always_inline)) float cellLight(const Grid& g, const Cell& k) {
     const int i = (int)(&k - g.c);
     return (g.sh && ((g.sh[i >> 3] >> (i & 7)) & 1) ? s_lightSh : s_light)[k.nrm];
@@ -493,11 +513,34 @@ static inline __attribute__((always_inline)) void probeAttr(const Probe& p, Smp&
     }
     s.al = n.along * 0.05f;
     s.mat = n.mat & 15; s.surf = n.mat >> 4; s.extra = n.extra;
-    s.half = (s.mat == MAT_ROAD || s.mat == MAT_SHOULDER) ? n.extra : 68;
+    s.half = (s.mat == MAT_ROAD || s.mat == MAT_SHOULDER) ? (n.extra & 0x7F) : 68;   // (bit 7: a tunnel)
 }
 static float s_lwNear = 0.f;                // z * 0.55 below this: the paint is at its minimum width (no divide needed)
 
 static float s_flowers = 0.f, s_wet = 0.f, s_paved = 1.f;
+
+// a field's pixel (Cell::extra bit 7): rows of corn, potato mounds or grain, the rows fading to their average colour
+// once they're too fine to draw. Flash: only field pixels call it.
+__attribute__((noinline)) static uint8_t cropPix(int x, int y, float wx, float wz, float s, float z, uint8_t extra) {
+    const int kind = (extra >> 5) & 3;
+    const float sp = kind == 2 ? 0.35f : 0.9f;                       // metres between rows
+    float f = ((extra & 0x10) ? wx : wz) * (1.f / sp); f -= floorf(f);
+    const float row = fabsf(f - 0.5f) * 2.f;                         // 0 on the row, 1 in the furrow
+    const float vis = clampf((sp * F / (z + 0.1f) - 1.5f) * (1.f / 1.5f), 0.f, 1.f);   // rows at least ~3 px apart: drawn
+    const uint32_t hp = hash32((uint32_t)(int)floorf(wx * 3.f) * 0x9E3779B1u ^ (uint32_t)(int)floorf(wz * 3.f) * 0x85EBCA77u);   // a third of a metre
+    if (kind == 0) {                                                 // corn: tall bright rows, narrow dark furrows, gold tassels
+        if (row > 1.f - 0.3f * vis) return (uint8_t)(P_SOIL + clampi(band(s - 3.f, x, y), 0, 15));
+        if (vis > 0.3f && row < 0.5f && (hp & 15) == 0) return (uint8_t)(P_SOIL + clampi(band(s + 4.f, x, y), 0, 15));
+        return (uint8_t)(P_GRASS + clampi(band(s + 0.6f - (1.f - vis) * 0.5f - row * 0.8f * vis, x, y), 0, 15));
+    }
+    if (kind == 1) {                                                 // potatoes: low, dark leafy mounds on wide brown ridges
+        if (row > 1.f - 0.55f * vis) return (uint8_t)(P_SOIL + clampi(band(s - 0.5f - (row - 0.45f) * 2.f, x, y), 0, 15));
+        return (uint8_t)(P_LEAF + clampi(band(s - 1.2f - (1.f - vis) * 0.5f - row * 1.6f * vis + ((hp & 3) == 0 ? 1.f : 0.f), x, y), 0, 15));
+    }
+    // grain: ripe gold, fine rows, stalk speckle
+    if (vis > 0.2f && (hp & 31) == 0) return (uint8_t)(P_GRASS + clampi(band(s + 1.5f, x, y), 0, 15));   // a green stalk here and there
+    return (uint8_t)(P_SOIL + clampi(band(s + 5.f - (row > 0.7f ? 2.6f * vis : 0.f) - ((hp & 7) == 0 ? 1.5f : 0.f), x, y), 0, 15));
+}
 
 // one ground pixel. Returns the palette index; sets *refl for water / wet surfaces.
 static inline uint8_t groundPix(int x, int y, float wx, float wz, float a, float al, float half, float lt, float z, float hgt,
@@ -508,7 +551,10 @@ static inline uint8_t groundPix(int x, int y, float wx, float wz, float a, float
     float nf = n * (1.f / 255.f);
     // more of the ramp for the light: shade lands where it always did (step 4), full sun about a step higher
     float s = lt * 13.5f - 0.48f + (nf - 0.5f) * 3.f;
-    if (s_reliefK > 0.f) s += (float)(n - tex(tu + s_rdu, tv + s_rdv)) * s_reliefK;   // grain facing the sun: lit
+    // grain facing the sun: lit. Never across the texture tile's edge: the tile repeats seamlessly in u but not in v, and
+    // the difference across that seam drew a stripe every tile (12.8 m near, 32 m, 64 m far)
+    if (s_reliefK > 0.f && !(((tv + s_rdv) ^ tv) & ~63) && !(((tu + s_rdu) ^ tu) & ~63))
+        s += (float)(n - tex(tu + s_rdu, tv + s_rdv)) * s_reliefK;
     if (s_lights > 0.02f && z < 75.f) s += s_lights * beamC[x] * 10.f * (z + 3.f <= 11.f ? 1.f : fminf(1.f, 11.f / (z + 3.f))) * (0.35f + 0.65f * s_night);
     float aa = fabsf(a);
     uint8_t c;
@@ -561,14 +607,14 @@ static inline uint8_t groundPix(int x, int y, float wx, float wz, float a, float
             }
             case MAT_SNOW: c = (uint8_t)(P_SNOW + clampi((int)(s * 0.55f + 1.f + dith(x, y)), 0, 7)); break;
             case MAT_SAND: c = (uint8_t)(P_SOIL + clampi(band(s + 2.f + sinf(wx * 0.9f + wz * 0.5f) * 0.9f, x, y), 0, 15)); break;
-            case MAT_SOIL: c = (uint8_t)(P_SOIL + clampi(band(s, x, y), 0, 15)); break;
+            case MAT_SOIL: c = (extra & 0x80) ? cropPix(x, y, wx, wz, s, z, extra) : (uint8_t)(P_SOIL + clampi(band(s, x, y), 0, 15)); break;
             case MAT_MUD:
                 c = (uint8_t)(P_SOIL + clampi(band(s * 0.6f - 1.f, x, y), 0, 15));
                 if (nf > 0.6f) { refl = true; }
                 break;
             case MAT_LOT: c = (uint8_t)(P_SOIL + clampi(band(s + 1.f, x, y), 0, 15)); break;
             default: {
-                if (farSmp && extra > 0 && mat < MAT_WATER) {                      // distant forest canopy
+                if (farSmp && extra > 0 && extra < 0x80 && mat < MAT_WATER) {                      // distant forest canopy
                     int lv = (int)(s * 0.8f - 1.f + nf * 3.f);
                     return (uint8_t)(P_LEAF + clampi(lv, 0, 15));
                 }
@@ -639,7 +685,7 @@ MR_HOT static void terrainColumns() {
                 if (far) {
                     if (!probeAt(gF, wrapF, wx, wz, true, pr)) break;
                     const Cell& n = probeNearest(pr);
-                    if (n.extra && (n.mat & 15) < MAT_WATER) pr.h += n.extra * (0.35f + 0.65f * tex((int)(wx * 0.6f), (int)(wz * 0.6f)) * (1.f / 255.f));
+                    if (n.extra && n.extra < 0x80 && (n.mat & 15) < MAT_WATER) pr.h += n.extra * (0.35f + 0.65f * tex((int)(wx * 0.6f), (int)(wz * 0.6f)) * (1.f / 255.f));
                 }
                 const float A = (pr.h - cy) * F;
                 float ys = 0.f;
@@ -663,6 +709,7 @@ MR_HOT static void terrainColumns() {
                 } else if (vis) {
                     if (!pYok) { pY = hx - (ph - cy) * F / pz; pYok = true; }      // exactly the row it would have had
                     for (int k = pHave ? 1 : 0; k < 2; k++) probeAttr(k ? pr : pp, k ? s : q);
+                    if (s_cloudAmt > 0.f) { s.lt *= cloudK(wx, wz); if (!pHave) q.lt *= cloudK(pwx, pwz); }   // cloud shadows
                     if (!pHave) { pa = q.a; pal = q.al; plt = q.lt; pmat = q.mat; psurf = q.surf; phalf = q.half; pextra = q.extra; }
                     float span = pY - ys;
                     float inv = span > 0.001f ? 1.f / span : 0.f;
@@ -1199,7 +1246,125 @@ static float headAt(float lat, float depth) {               // headlight on a pr
     return c > 0.f ? s_lights * c * fminf(1.f, 14.f / (depth + 4.f)) * s_night : 0.f;
 }
 
+static inline float sq(float v) { return v * v; }
+extern float g_fallsNear;                           // the waterfall roar's level (audio)
+static inline uint8_t fogged(uint8_t c, float dep, int x, int y);
+static void line3(float ax, float ay, float az, float bx, float by, float bz, uint8_t col, int thick);
+static inline bool roughlyInView(float x, float z, float maxD);
+// ---- waterfalls: a lip cell (terrain marks it) and the lowest ground within 15 m down the face below it: a sheet of
+// white water streaming down between them, foam at its foot. Drawn a little in front of the face it runs down.
+static float s_fallX[4], s_fallZ[4];
+static int s_fallN = 0;
+static void drawFall(const Grid& g, int i, int j) {
+    const float x0 = i * g.cell, z0 = j * g.cell;
+    for (int k = 0; k < s_fallN; k++) if (fabsf(s_fallX[k] - x0) < 12.f && fabsf(s_fallZ[k] - z0) < 12.f) return;   // one a cliff
+    const Cell& c = g.c[gridWrap(j, g.N) * g.N + gridWrap(i, g.N)];
+    float nx = ((c.nrm >> 4) - 8) * 0.125f, nz = ((c.nrm & 15) - 8) * 0.125f;        // the normal leans downhill
+    float nl = sqrtf(nx * nx + nz * nz);
+    if (nl < 0.2f) return;
+    nx /= nl; nz /= nl;
+    // the lip may be anywhere on the face: up the face to its top edge (where the climb flattens out)
+    float top = c.h * 0.1f, tx = x0, tz = z0;
+    for (int k = 1; k <= 8; k++) {
+        int ii = i - (int)floorf(nx * k + 0.5f), jj = j - (int)floorf(nz * k + 0.5f);
+        if (ii < g.ox || jj < g.oz || ii >= g.ox + g.N || jj >= g.oz + g.N) break;
+        const Cell& o = g.c[gridWrap(jj, g.N) * g.N + gridWrap(ii, g.N)];
+        float oh = o.h * 0.1f;
+        if (oh < top + 0.6f) break;                                   // the top: the climb stops
+        top = oh; tx = ii * g.cell; tz = jj * g.cell;
+    }
+    float bot = c.h * 0.1f, bx = x0, bz = z0;
+    for (int k = 1; k <= 6; k++) {
+        int ii = i + (int)floorf(nx * k + 0.5f), jj = j + (int)floorf(nz * k + 0.5f);
+        if (ii < g.ox || jj < g.oz || ii >= g.ox + g.N || jj >= g.oz + g.N) break;
+        const Cell& o = g.c[gridWrap(jj, g.N) * g.N + gridWrap(ii, g.N)];
+        if ((o.mat & 15) == MAT_ROAD || (o.mat & 15) == MAT_SHOULDER) break;
+        float oh = o.h * 0.1f;
+        if (oh < bot) { bot = oh; bx = ii * g.cell; bz = jj * g.cell; }
+    }
+    if (top - bot < 5.f) return;
+    if (s_fallN < 4) { s_fallX[s_fallN] = x0; s_fallZ[s_fallN] = z0; s_fallN++; }
+    float sxT, syT, dT, sxB, syB, dB;
+    if (!renderProject(tx, top + 0.3f, tz, sxT, syT, dT) || !renderProject(bx, bot, bz, sxB, syB, dB)) return;
+    float dist = sqrtf(sq(x0 - cx) + sq(z0 - cz));
+    g_fallsNear = fmaxf(g_fallsNear, clampf(1.f - dist * (1.f / 160.f), 0.f, 1.f));
+    int y0 = (int)ceilf(syT), y1 = (int)syB;
+    if (y1 <= y0 || y1 - y0 > 2 * H) return;
+    const float tt = g_scene.t;
+    const float inv = 1.f / (float)(y1 - y0);
+    const float drop = top - bot;
+    int ya = y0 < 0 ? 0 : y0, yb = y1 + 3 > H ? H : y1 + 3;
+    for (int y = ya; y < yb; y++) {
+        float v = (y - y0) * inv;                                     // 0 at the lip, 1 at the foot (a little past: foam)
+        float vc = v > 1.f ? 1.f : v;
+        float sx = sxT + (sxB - sxT) * vc, dep = dT + (dB - dT) * vc;
+        if (dep < 1.f) continue;
+        float hw = (1.3f + 0.9f * vc + (v > 0.85f ? (v - 0.85f) * 9.f : 0.f)) * F / dep;   // it spreads, and foams at the foot
+        uint8_t zc = zcode(fmaxf(fminf(dep - 2.5f, dep * 0.8f), 0.6f));   // in front of the face it runs down (a face bulges)
+        int xa = (int)(sx - hw), xb = (int)(sx + hw);
+        if (xa < 0) xa = 0;
+        if (xb > W - 1) xb = W - 1;
+        float m = vc * drop * 2.2f - tt * 7.f;                        // streaks running down, about 7 m/s
+        for (int x = xa; x <= xb; x++) {
+            int i2 = y * W + x;
+            if (y >= s_bottom[x] || zb[i2] <= zc) continue;
+            float ux = (x - sx) / (hw + 0.5f);                        // -1..1 across
+            uint32_t hh = hash32((uint32_t)(int)((ux + 1.f) * 5.f) * 0x9E3779B1u ^ (uint32_t)(int)floorf(m + ux * 0.7f) * 0x85EBCA77u);
+            int lv = 5 + (int)(hh & 3) - (fabsf(ux) > 0.8f ? 2 : 0);
+            uint8_t col = v > 0.85f || (hh & 12) == 12 ? (uint8_t)(P_SNOW + clampi(lv + 1, 0, 7)) : (uint8_t)(P_WATER + clampi(lv, 0, 7));
+            fb[i2] = fogged(col, dep, x, y); zb[i2] = zc;
+        }
+    }
+}
+
+// ---- farms: pastures (terrainPlot use 3) get a post-and-rail fence round their edge and a few cattle. Posts stand
+// only where the pasture is (flat, off the road): the fence follows it.
+static void drawFarm() {
+    const float R = 130.f;
+    const int i0 = (int)floorf((cx - R) * (1.f / PLOT_M)), i1 = (int)floorf((cx + R) * (1.f / PLOT_M));
+    const int j0 = (int)floorf((cz - R) * (1.f / PLOT_M)), j1 = (int)floorf((cz + R) * (1.f / PLOT_M));
+    const uint8_t col = (uint8_t)(P_BARK + clampi((int)(s_light[0x88] * 6.f), 1, 5));
+    const uint8_t rc = (uint8_t)(P_BARK + clampi((int)(s_light[0x88] * 6.f) + 1, 1, 6));
+    bool any = false;
+    for (int pj = j0; pj <= j1; pj++) for (int pi = i0; pi <= i1; pi++) {
+        if ((terrainPlot(pi, pj) & 0xE0) != 0xE0) continue;      // pastures only
+        any = true;
+        if (!roughlyInView(pi * PLOT_M + PLOT_M * 0.5f, pj * PLOT_M + PLOT_M * 0.5f, R + 45.f)) continue;
+        for (int side = 0; side < 4; side++) {                   // the fence (field.cpp: where it stands, what's burst)
+            float px = 0.f, pz = 0.f, py = 0.f; bool prev = false;
+            for (int k = 0; k <= FENCE_POSTS; k++) {
+                float x, z;
+                bool on = fieldFencePost(pi, pj, side, k, x, z) && sq(x - cx) + sq(z - cz) < R * R;
+                if (!on) { prev = false; continue; }
+                const bool burstL = k > 0 && fieldFenceBroken(pi, pj, side, k - 1), burstR = k < FENCE_POSTS && fieldFenceBroken(pi, pj, side, k);
+                float y = terrainHeight(x, z);
+                float sx, sy, d;
+                if (renderProject(x, y, z, sx, sy, d)) {
+                    if (!(burstL && burstR)) line3(x, y - 0.1f, z, x, y + 1.25f, z, col, d < 18.f ? 2 : 1);   // (a post with both spans gone went too)
+                    if (prev && !burstL) {
+                        line3(px, py + 0.55f, pz, x, y + 0.55f, z, rc, 1);
+                        line3(px, py + 1.05f, pz, x, y + 1.05f, z, rc, 1);
+                    }
+                }
+                px = x; pz = z; py = y; prev = true;
+            }
+        }
+    }
+    if (!any) return;
+    Cow cows[24];
+    const int n = fieldCows(cx, cz, 150.f, g_scene.t, cows, 24);  // the herds
+    for (int k = 0; k < n; k++) {
+        const Cow& c = cows[k];
+        float sx, sy, d;
+        if (!renderProject(c.x, terrainHeight(c.x, c.z), c.z, sx, sy, d) || d < 1.f) continue;
+        float pxH = 1.5f * F / d;
+        if (pxH < 2.f) continue;
+        blitTpl(c.pose ? T_COW1 : T_COW0, sx, sy + 1.f, pxH, d, sinf(c.heading - cyaw) < 0.f, false, headAt((c.x - cx) * rx + (c.z - cz) * rz, d));
+    }
+}
+
 static void drawVegetation() {
+    s_fallN = 0; g_fallsNear = 0.f;
     const Grid& g = terrainNear();
     if (!g.c) return;
     bool snowy = g_scene.biomeA == B_TUNDRA || g_scene.biomeA == B_ALPINE || g_scene.snow > 0.3f;
@@ -1218,6 +1383,7 @@ static void drawVegetation() {
             const Cell& c = g.c[gridWrap(j, g.N) * g.N + gridWrap(i, g.N)];
             uint8_t t = c.extra & 15;
             uint8_t m = c.mat & 15;
+            if (c.extra == 0x80 && m == MAT_ROCK) { drawFall(g, i, j); continue; }   // a waterfall's lip
             if (!t || t >= VEG_N || m == MAT_ROAD || m == MAT_SHOULDER || m == MAT_WATER || m == MAT_LOT) continue;
             float wx0 = (i + 0.5f) * g.cell - cx, wz0 = (j + 0.5f) * g.cell - cz;
             float d0 = wx0 * fx + wz0 * fz;
@@ -1364,7 +1530,9 @@ static void fillTri(const SV& a, const SV& b, const SV& c, int kind, int shade) 
                 lv += (pi & 1) ? 0 : 1;
                 if (frc < 0.14f) lv -= 2;                                          // the gap between two planks
             }
-            fb[i] = fogged((uint8_t)(P_BARK + clampi(lv, 0, 7)), dep, x, y);
+            fb[i] = fogged(kind == 2 ? (uint8_t)(P_ROCK + clampi(lv + (((x >> 1) ^ (y * 3 >> 2)) & 1), 0, 15))   // rock: a grain
+                         : kind == 3 ? (uint8_t)(P_ROAD + clampi(lv, 0, 15))                                    // concrete
+                                     : (uint8_t)(P_BARK + clampi(lv, 0, 7)), dep, x, y);
             zb[i] = zc;
         }
     }
@@ -1417,23 +1585,25 @@ static inline int timberShade(float nx, float nz) {  // a vertical timber face l
     float lt = 0.22f + 0.62f * fmaxf(0.f, nx * s_sunDx + nz * s_sunDz) * s_sunK;
     return clampi((int)(lt * 8.f) - 1, 0, 5);
 }
-static void drawDeckSeg(const RoadNode& a, const RoadNode& b) {
+static void drawDeckSeg(const RoadNode& a, const RoadNode& b, bool river) {
     if (!roughlyInView(a.x, a.z, 320.f) && !roughlyInView(b.x, b.z, 320.f)) return;
     const float ha = a.half20 * 0.05f + 1.3f, hb = b.half20 * 0.05f + 1.3f;   // the road and its shoulders: what the wheels ride
     const float pax = -sinf(a.yaw), paz = cosf(a.yaw), pbx = -sinf(b.yaw), pbz = cosf(b.yaw);
     const float ya = a.y + 0.13f, yb = b.y + 0.13f;                  // just above the road's crown at the abutments
     CV top[4] = { camPt(a.x + pax * ha, ya, a.z + paz * ha, a.s), camPt(b.x + pbx * hb, yb, b.z + pbz * hb, b.s),
                   camPt(b.x - pbx * hb, yb, b.z - pbz * hb, b.s), camPt(a.x - pax * ha, ya, a.z - paz * ha, a.s) };
-    fillPoly(top, 4, 0, clampi((int)(s_light[0x88] * 8.f), 1, 6));
+    if (river) fillPoly(top, 4, 3, clampi((int)(s_light[0x88] * 12.f), 2, 12));      // a river bridge: a concrete deck
+    else fillPoly(top, 4, 0, clampi((int)(s_light[0x88] * 8.f), 1, 6));
     for (int e = -1; e <= 1; e += 2) {                 // the stringer along each side, and the rail
         float qax = a.x + pax * ha * e, qaz = a.z + paz * ha * e, qbx = b.x + pbx * hb * e, qbz = b.z + pbz * hb * e;
         CV side[4] = { camPt(qax, ya, qaz, 0.f), camPt(qbx, yb, qbz, 0.f), camPt(qbx, yb - 0.7f, qbz, 0.f), camPt(qax, ya - 0.7f, qaz, 0.f) };
         int sh = timberShade(pax * e, paz * e);
+        if (river) { fillPoly(side, 4, 3, sh * 2 + 2); continue; }      // (its truss is its rail: drawRiverTruss)
         fillPoly(side, 4, 1, sh);
         line3(qax, ya + 0.95f, qaz, qbx, yb + 0.95f, qbz, (uint8_t)(P_BARK + clampi(sh + 2, 0, 7)), 1);
     }
 }
-static void drawBent(const RoadNode& n) {              // the trestle's legs at this node, braced when tall
+static void drawBent(const RoadNode& n, bool river) {  // the trestle's legs at this node, braced when tall (a river bridge: concrete piers)
     if (!roughlyInView(n.x, n.z, 260.f)) return;
     const float hf = n.half20 * 0.05f;
     const float px = -sinf(n.yaw), pz = cosf(n.yaw);
@@ -1442,11 +1612,24 @@ static void drawBent(const RoadNode& n) {              // the trestle's legs at 
     for (int e = 0; e < 2; e++) {
         float o = (e ? -1.f : 1.f) * (hf + 0.9f);                   // under the deck's edges
         lx[e] = n.x + px * o; lz[e] = n.z + pz * o;
-        gy[e] = terrainHeight(lx[e], lz[e]);           // the land, or the road under the deck
+        Ground g; terrainGround(lx[e], lz[e], g);
+        // a foot on the driving surface of a road below: this bent would stand in its lane. The span carries over
+        // it instead (no legs here; the bents either side of the road stay). The deck's own road is 0.9 m clear.
+        if (g.mat != MAT_WATER && fabsf(g.across) < g.half + 0.3f) return;
+        gy[e] = g.mat == MAT_WATER ? g.h + g.water : g.h;   // the land, or the road under the deck
     }
     float tall = top - fminf(gy[0], gy[1]);
     if (tall < 0.4f) return;
     float d = (n.x - cx) * fx + (n.z - cz) * fz;
+    if (river) {                                       // a pier every 15 m: two round columns and a cap beam
+        if (((int)floorf(n.s / ROAD_DS + 0.5f)) % 5) return;
+        int tp = clampi((int)(1.1f * F / fmaxf(d, 1.f)), 1, 14);
+        int sh = timberShade(px, pz);
+        uint8_t c = (uint8_t)(P_ROAD + clampi(sh * 2 + 3, 0, 15)), c2 = (uint8_t)(P_ROAD + clampi(sh * 2 + 1, 0, 15));
+        for (int e = 0; e < 2; e++) if (top - gy[e] > 0.3f) line3(lx[e], top, lz[e], lx[e], gy[e] - 0.5f, lz[e], e ? c2 : c, tp);
+        line3(lx[0], top - 0.2f, lz[0], lx[1], top - 0.2f, lz[1], c2, clampi(tp / 2, 1, 6));
+        return;
+    }
     int thick = clampi((int)(0.28f * F / fmaxf(d, 1.f)), 1, 5);
     int sh = timberShade(px, pz);
     uint8_t c = (uint8_t)(P_BARK + sh), c2 = (uint8_t)(P_BARK + clampi(sh - 1, 0, 7));
@@ -1493,21 +1676,231 @@ static void drawCaution(const RoadNode& n, int side) {
         }
     }
 }
+// ---- a river bridge's through truss (steel, both sides): chords, posts, diagonals and the struts overhead
+static void drawRiverTruss(const RoadNode& a, const RoadNode& b, bool aEnd, bool bEnd, int k) {
+    if (!roughlyInView(a.x, a.z, 300.f) && !roughlyInView(b.x, b.z, 300.f)) return;
+    const float ha = a.half20 * 0.05f + 1.5f, hb = b.half20 * 0.05f + 1.5f, TH = 5.5f;
+    const float pax = -sinf(a.yaw), paz = cosf(a.yaw), pbx = -sinf(b.yaw), pbz = cosf(b.yaw);
+    const float d = fmaxf(1.f, (a.x - cx) * fx + (a.z - cz) * fz);
+    const int th = clampi((int)(0.35f * F / d), 1, 4);
+    const int sh = clampi((int)(s_light[0x88] * 12.f), 3, 13);
+    const uint8_t c = (uint8_t)(P_ROAD + sh), c2 = (uint8_t)(P_ROAD + clampi(sh - 2, 0, 15));
+    for (int e = -1; e <= 1; e += 2) {
+        const float ax = a.x + pax * ha * e, az = a.z + paz * ha * e, bx = b.x + pbx * hb * e, bz = b.z + pbz * hb * e;
+        const float ya = a.y + 0.2f, yb = b.y + 0.2f;
+        const float ta = aEnd ? ya : ya + TH, tb = bEnd ? yb : yb + TH;      // the ends slope down to the deck
+        line3(ax, ya, az, bx, yb, bz, c2, th);                               // bottom chord
+        line3(ax, ta, az, bx, tb, bz, c, th);                                // top chord (an end post where it slopes)
+        if (!aEnd) line3(ax, ya, az, ax, ta, az, c, th);                    // post
+        if (!aEnd && !bEnd) {                                                // diagonals, alternating
+            if (k & 1) line3(ax, ya, az, bx, tb, bz, c2, clampi(th - 1, 1, 3));
+            else line3(ax, ta, az, bx, yb, bz, c2, clampi(th - 1, 1, 3));
+        }
+    }
+    if (!aEnd) line3(a.x + pax * ha, a.y + 0.2f + TH, a.z + paz * ha, a.x - pax * ha, a.y + 0.2f + TH, a.z - paz * ha, c2, clampi(th - 1, 1, 3));   // strut overhead
+}
+// ---- tunnels: a concrete tube along the road where it runs through a ridge (RN_TUNNEL), lamps along its roof, and a
+// rock headwall round each portal. The road inside is kept out of the sun (terrain: its cells' shadow bit).
+static void drawTunnelSeg(const RoadNode& a, const RoadNode& b, int k) {
+    if (!roughlyInView(a.x, a.z, 280.f) && !roughlyInView(b.x, b.z, 280.f)) return;
+    const float ha = a.half20 * 0.05f + 1.6f, hb = b.half20 * 0.05f + 1.6f, WH = 4.6f, RH = 6.6f;
+    const float pax = -sinf(a.yaw), paz = cosf(a.yaw), pbx = -sinf(b.yaw), pbz = cosf(b.yaw);
+    auto P = [&](const RoadNode& n, float px, float pz, float hf, float acr, float up) { return camPt(n.x + px * hf * acr, n.y + up, n.z + pz * hf * acr, 0.f); };
+    const float lt = s_light[0x88];
+    const int wall = clampi((int)(lt * 5.f) + 2, 2, 7), roof = clampi((int)(lt * 3.f) + 1, 1, 5);
+    for (int e = -1; e <= 1; e += 2) {
+        CV w[4] = { P(a, pax, paz, ha, e, -0.3f), P(b, pbx, pbz, hb, e, -0.3f), P(b, pbx, pbz, hb, e, WH), P(a, pax, paz, ha, e, WH) };
+        fillPoly(w, 4, 3, wall + ((k & 1) ? 1 : 0));                      // the walls, in 3 m panels
+        CV r[4] = { P(a, pax, paz, ha, e, WH), P(b, pbx, pbz, hb, e, WH), P(b, pbx, pbz, hb, e * 0.55f, RH), P(a, pax, paz, ha, e * 0.55f, RH) };
+        fillPoly(r, 4, 3, roof + 1);                                       // the haunches
+    }
+    CV c[4] = { P(a, pax, paz, ha, -0.55f, RH), P(b, pbx, pbz, hb, -0.55f, RH), P(b, pbx, pbz, hb, 0.55f, RH), P(a, pax, paz, ha, 0.55f, RH) };
+    fillPoly(c, 4, 3, roof);                                               // the crown
+    if ((k & 3) == 0) line3(a.x, a.y + RH - 0.1f, a.z, b.x * 0.4f + a.x * 0.6f, b.y * 0.4f + a.y * 0.6f + RH - 0.1f, b.z * 0.4f + a.z * 0.6f, P_WINDOW, 2);   // a lamp
+}
+static void drawPortal(const RoadNode& n, bool backward) {
+    if (!roughlyInView(n.x, n.z, 300.f)) return;
+    const float hf = n.half20 * 0.05f + 1.6f, RH = 6.6f, WW = hf + 14.f;
+    const float px = -sinf(n.yaw), pz = cosf(n.yaw);
+    float top = fmaxf(terrainNatural(n.x, n.z) - n.y, RH + 3.f) + 1.f;
+    auto P = [&](float acr, float up) { return camPt(n.x + px * acr, n.y + up, n.z + pz * acr, 0.f); };
+    const float fxn = cosf(n.yaw) * (backward ? 1.f : -1.f), fzn = sinf(n.yaw) * (backward ? 1.f : -1.f);   // the face's outward normal
+    const int sh = clampi((int)((0.35f + 0.65f * fmaxf(0.f, fxn * s_sunDx + fzn * s_sunDz) * s_sunK) * s_light[0x88] * 14.f), 1, 13);
+    CV l[4] = { P(-WW, -2.f), P(-hf, -2.f), P(-hf, top), P(-WW, top) };
+    CV r[4] = { P(hf, -2.f), P(WW, -2.f), P(WW, top), P(hf, top) };
+    CV m[4] = { P(-hf, RH), P(hf, RH), P(hf, top), P(-hf, top) };
+    CV ql[3] = { P(-hf, 4.6f), P(-hf * 0.55f, RH), P(-hf, RH) }, qr[3] = { P(hf, 4.6f), P(hf, RH), P(hf * 0.55f, RH) };
+    fillPoly(l, 4, 2, sh); fillPoly(r, 4, 2, sh); fillPoly(m, 4, 2, sh);
+    fillPoly(ql, 3, 2, sh); fillPoly(qr, 3, 2, sh);
+    const uint8_t rim = (uint8_t)(P_ROAD + clampi(sh + 2, 0, 15));        // the concrete ring round the bore
+    line3(n.x - px * hf, n.y - 0.3f, n.z - pz * hf, n.x - px * hf, n.y + 4.6f, n.z - pz * hf, rim, 2);
+    line3(n.x + px * hf, n.y - 0.3f, n.z + pz * hf, n.x + px * hf, n.y + 4.6f, n.z + pz * hf, rim, 2);
+    line3(n.x - px * hf * 0.55f, n.y + RH, n.z - pz * hf * 0.55f, n.x + px * hf * 0.55f, n.y + RH, n.z + pz * hf * 0.55f, rim, 2);
+}
+
 static void structuresOn(bool arm, int lo, int hi) {
     const int n = arm ? roadArmCount() : roadCount();
     for (int i = lo; i <= hi; i++) {
         const RoadNode& a = arm ? roadArmNode(i) : roadNode(i);
-        if (!(a.flags & (RN_BRIDGE | RN_CAUTION))) continue;
+        if (!(a.flags & (RN_BRIDGE | RN_CAUTION | RN_TUNNEL))) {
+            if (i + 1 < n && ((arm ? roadArmNode(i + 1) : roadNode(i + 1)).flags & RN_BRIDGE)) {   // a deck starts next
+                const RoadNode& b = arm ? roadArmNode(i + 1) : roadNode(i + 1);
+                drawDeckSeg(a, b, (b.side & RN_SIDE_RIVER) != 0);
+            }
+            continue;
+        }
         if (a.flags & RN_CAUTION) {
             if (a.side & RN_SIDE_CAUTION_R) drawCaution(a, 1);
             if (a.side & RN_SIDE_CAUTION_L) drawCaution(a, -1);
         }
-        if (!(a.flags & RN_BRIDGE)) continue;
-        drawBent(a);
-        if (i + 1 < n) { const RoadNode& b = arm ? roadArmNode(i + 1) : roadNode(i + 1); if (b.flags & RN_BRIDGE) drawDeckSeg(a, b); }
+        if (a.flags & RN_TUNNEL) {
+            const bool pT = i > 0 && ((arm ? roadArmNode(i - 1) : roadNode(i - 1)).flags & RN_TUNNEL);
+            const bool nT = i + 1 < n && ((arm ? roadArmNode(i + 1) : roadNode(i + 1)).flags & RN_TUNNEL);
+            if (!pT) drawPortal(a, false);
+            if (!nT) drawPortal(a, true);
+            if (nT) drawTunnelSeg(a, arm ? roadArmNode(i + 1) : roadNode(i + 1), i);
+            continue;
+        }
+        if (!(a.flags & RN_BRIDGE)) {
+            // the node before a deck: its approach slab, at the road's height, over the land's step down to the span
+            // (the land is baked in 2.5 m cells: between the road's last cell and the first under the deck it slopes away)
+            if (i + 1 < n) { const RoadNode& b = arm ? roadArmNode(i + 1) : roadNode(i + 1); if (b.flags & RN_BRIDGE) drawDeckSeg(a, b, (b.side & RN_SIDE_RIVER) != 0); }
+            continue;
+        }
+        const bool river = (a.side & RN_SIDE_RIVER) != 0;
+        drawBent(a, river);
+        if (i + 1 < n) {
+            const RoadNode& b = arm ? roadArmNode(i + 1) : roadNode(i + 1);
+            if (!(b.flags & RN_BRIDGE)) drawDeckSeg(a, b, river);         // and the slab off its far end
+            else {
+                drawDeckSeg(a, b, river);
+                if (river) {
+                    const bool aEnd = i == 0 || !((arm ? roadArmNode(i - 1) : roadNode(i - 1)).flags & RN_BRIDGE);
+                    const bool bEnd = i + 2 >= n || !((arm ? roadArmNode(i + 2) : roadNode(i + 2)).flags & RN_BRIDGE);
+                    drawRiverTruss(a, b, aEnd, bEnd, i);
+                }
+            }
+        }
     }
 }
+// ---- the Red Canyon's arches (field.cpp places them): a rough red rock ring over the road, 4 m thick, its legs set
+// 4.5 m past the road's edges and sunk into the ground
+static void drawArches() {
+    int n; const Arch* A = fieldArches(n);
+    for (int k = 0; k < n; k++) {
+        const Arch& a = A[k];
+        if (!roughlyInView(a.x, a.z, 340.f)) continue;
+        const float fx2 = a.az, fz2 = -a.ax;                         // along the road
+        const float hi = 8.5f + a.ri * 0.15f, ho = hi + 3.2f;
+        const float lowL = fminf(a.y - 1.5f, terrainHeight(a.x - a.ax * (a.ri + 1.7f), a.z - a.az * (a.ri + 1.7f)) - 0.6f);
+        const float lowR = fminf(a.y - 1.5f, terrainHeight(a.x + a.ax * (a.ri + 1.7f), a.z + a.az * (a.ri + 1.7f)) - 0.6f);
+        const uint32_t sd = hash32((uint32_t)(a.x * 7.f) ^ (uint32_t)(a.z * 13.f));
+        const int K = 10;
+        float pa[K + 1], pu[K + 1], qa[K + 1], qu[K + 1];              // inner and outer rings: across, up
+        for (int i = 0; i <= K; i++) {
+            float th = 3.1415927f * i / K, c = -cosf(th), s = sinf(th);
+            float jag = (i == 0 || i == K) ? 0.f : (hashf(sd + i * 7) - 0.5f) * 1.1f;
+            pa[i] = a.ri * c; pu[i] = a.y - 0.3f + hi * s;
+            qa[i] = (a.ro + jag) * c; qu[i] = a.y - 0.3f + ho * s + jag;
+            if (i == 0) { pu[i] = qu[i] = lowL; } else if (i == K) { pu[i] = qu[i] = lowR; }
+        }
+        const float lt = s_light[0x88];
+        const int front = clampi((int)((0.35f + 0.65f * fmaxf(0.f, -(fx2 * s_sunDx + fz2 * s_sunDz)) * s_sunK) * lt * 15.f), 1, 14);
+        const int back = clampi((int)((0.35f + 0.65f * fmaxf(0.f, fx2 * s_sunDx + fz2 * s_sunDz) * s_sunK) * lt * 15.f), 1, 14);
+        auto P = [&](float acr, float up, float al) { return camPt(a.x + a.ax * acr + fx2 * al, up, a.z + a.az * acr + fz2 * al, 0.f); };
+        for (int i = 0; i < K; i++) {
+            const float T = 2.f;
+            CV f[4] = { P(qa[i], qu[i], -T), P(qa[i + 1], qu[i + 1], -T), P(pa[i + 1], pu[i + 1], -T), P(pa[i], pu[i], -T) };
+            CV b[4] = { P(qa[i], qu[i], T), P(qa[i + 1], qu[i + 1], T), P(pa[i + 1], pu[i + 1], T), P(pa[i], pu[i], T) };
+            CV o[4] = { P(qa[i], qu[i], -T), P(qa[i + 1], qu[i + 1], -T), P(qa[i + 1], qu[i + 1], T), P(qa[i], qu[i], T) };
+            CV u[4] = { P(pa[i], pu[i], -T), P(pa[i + 1], pu[i + 1], -T), P(pa[i + 1], pu[i + 1], T), P(pa[i], pu[i], T) };
+            float mid = (i + 0.5f) / K;                               // the top catches the sky; the underside is in shade
+            fillPoly(o, 4, 2, clampi((int)(lt * (8.f + 5.f * sinf(3.1415927f * mid))), 1, 14));
+            fillPoly(u, 4, 2, clampi((int)(lt * 4.f), 1, 8));
+            fillPoly(f, 4, 2, front);
+            fillPoly(b, 4, 2, back);
+        }
+    }
+}
+
+// ---- geysers (field.cpp): a pale sinter pad, and when one blows, a column of white water up to 20 m; between
+// eruptions a little steam
+static void drawGeysers() {
+    int n; const Geyser* G = fieldGeysers(n);
+    const float tt = g_scene.t;
+    for (int k = 0; k < n; k++) {
+        const Geyser& g = G[k];
+        if (!roughlyInView(g.x, g.z, 280.f)) continue;
+        CV pad[8];
+        for (int i = 0; i < 8; i++) {
+            float an = i * 0.785398f;
+            pad[i] = camPt(g.x + cosf(an) * 4.f, g.y + 0.08f, g.z + sinf(an) * 3.f, 0.f);
+        }
+        fillPoly(pad, 8, 2, clampi((int)(s_light[0x88] * 15.f), 2, 15));
+        float sx, sy, d;
+        if (!renderProject(g.x, g.y, g.z, sx, sy, d) || d < 1.f) continue;
+        const float H0 = g.h > 0.5f ? g.h : 1.5f + 0.5f * sinf(tt * 1.3f + g.x);   // the column, or the steam
+        const float top = sy - H0 * F / d;
+        const uint8_t zc = zcode(fmaxf(d - 1.f, 0.6f));
+        int y0 = (int)top, y1 = (int)sy;
+        if (y0 < 0) y0 = 0;
+        if (y1 > H) y1 = H;
+        g_fallsNear = fmaxf(g_fallsNear, g.h > 3.f ? clampf(1.f - d * (1.f / 160.f), 0.f, 1.f) : 0.f);
+        for (int y = y0; y < y1; y++) {
+            float v = (sy - y) / (sy - top + 0.5f);                    // 0 at the ground, 1 at the top
+            float hw = (g.h > 0.5f ? 1.1f + 2.6f * v * v + (v > 0.82f ? (v - 0.82f) * 14.f : 0.f) : 0.6f + 1.2f * v) * F / d;   // a plume, billowing at the top
+            int xa = (int)(sx - hw), xb = (int)(sx + hw);
+            if (xa < 0) xa = 0;
+            if (xb > W - 1) xb = W - 1;
+            for (int x = xa; x <= xb; x++) {
+                int i2 = y * W + x;
+                if (y >= s_bottom[x] || zb[i2] <= zc) continue;
+                uint32_t hh = hash32((uint32_t)((x - (int)sx) / 2 + 64) * 0x9E3779B1u ^ (uint32_t)((y + (int)(tt * 30.f)) / 2) * 0x85EBCA77u);
+                if (g.h <= 0.5f && (hh & 3) != 0) continue;              // steam: thin, broken
+                float ux = fabsf((x - sx) / (hw + 0.5f));
+                if (ux > 0.7f && (hh & 1)) continue;                     // a ragged edge
+                int lv = 4 + (int)((hh >> 4) & 3) - (ux > 0.6f ? 1 : 0);
+                fb[i2] = fogged((uint8_t)(P_SNOW + clampi(lv, 0, 7)), d, x, y); zb[i2] = zc;
+            }
+        }
+    }
+}
+
+// ---- launch ramps (terrain.cpp shapes the land): a timber frame along the kicker's sides and at its lip
+static void drawRamps() {
+    const float R = 120.f;
+    const int i0 = (int)floorf((cx - R) / RAMP_LATTICE), i1 = (int)floorf((cx + R) / RAMP_LATTICE);
+    const int j0 = (int)floorf((cz - R) / RAMP_LATTICE), j1 = (int)floorf((cz + R) / RAMP_LATTICE);
+    for (int lj = j0; lj <= j1; lj++) for (int li = i0; li <= i1; li++) {
+        Ramp r;
+        if (!terrainRamp(li, lj, r, false) || !roughlyInView(r.x, r.z, R) || sq(r.x - cx) + sq(r.z - cz) > R * R) continue;
+        if (!terrainRamp(li, lj, r, true)) continue;
+        const float sxn = -r.uz, szn = r.ux;                            // across the ramp
+        const float d = sqrtf(sq(r.x - cx) + sq(r.z - cz));
+        const int th = d < 20.f ? 2 : 1;
+        const uint8_t c = (uint8_t)(P_BARK + clampi((int)(s_light[0x88] * 6.f), 1, 5)), c2 = (uint8_t)(P_BARK + clampi((int)(s_light[0x88] * 6.f) + 1, 1, 6));
+        // the kicker's timber deck, true to its shape (the land's cells round its lip off): the run-up's foot on the
+        // ground, the lip 3 m over the ground under it (that ground: between the foot and just past the drop)
+        const float sx0 = r.x - r.ux * 11.f, sz0 = r.z - r.uz * 11.f, yFoot = terrainHeight(sx0, sz0);
+        const float yPast = terrainHeight(r.x + r.ux * 3.f, r.z + r.uz * 3.f);
+        const float yLip = yFoot + (yPast - yFoot) * (11.f / 14.f) + 3.f, yLipG = yLip - 3.f;
+        CV dk[4] = { camPt(sx0 - sxn * 2.4f, yFoot + 0.05f, sz0 - szn * 2.4f, 0.f), camPt(r.x - sxn * 2.4f, yLip, r.z - szn * 2.4f, 11.f),
+                     camPt(r.x + sxn * 2.4f, yLip, r.z + szn * 2.4f, 11.f), camPt(sx0 + sxn * 2.4f, yFoot + 0.05f, sz0 + szn * 2.4f, 0.f) };
+        fillPoly(dk, 4, 0, clampi((int)(s_light[0x88] * 8.f), 1, 6));
+        for (int e = -1; e <= 1; e += 2) {
+            const float ox = sxn * 2.45f * e, oz = szn * 2.45f * e;
+            CV sd[3] = { camPt(sx0 + ox, yFoot, sz0 + oz, 0.f), camPt(r.x + ox, yLip, r.z + oz, 0.f), camPt(r.x + ox, yLipG - 0.3f, r.z + oz, 0.f) };
+            fillPoly(sd, 3, 1, timberShade(sxn * e, szn * e));                      // its sides, down to the ground
+            line3(sx0 + ox, yFoot + 0.1f, sz0 + oz, r.x + ox, yLip + 0.1f, r.z + oz, c2, th);   // the edge rail
+            line3(r.x + ox, yLip, r.z + oz, r.x + ox, yLipG - 0.3f, r.z + oz, c, th);           // the post at the lip
+        }
+        line3(r.x - sxn * 2.45f, yLip + 0.1f, r.z - szn * 2.45f, r.x + sxn * 2.45f, yLip + 0.1f, r.z + szn * 2.45f, c2, th);   // the lip
+    }
+}
+
+extern float g_riverNear;                            // the river's sound level (audio)
 static void drawRoadStructures() {
+    g_riverNear = clampf(1.f - terrainRiverDist(cx, cz) * (1.f / 160.f), 0.f, 1.f);
     int n = roadCount();
     if (n > 1) {
         int c = roadCarIndex();
@@ -1524,7 +1917,9 @@ static void drawCritters() {
         float sx, sy, d;
         if (!renderProject(c[k].x, c[k].y, c[k].z, sx, sy, d) || d > 160.f) continue;
         float dirScreen = sinf(c[k].yaw - cyaw);
-        blitTpl((uint8_t)(T_DEER0 + (c[k].pose & 3)), sx, sy + 1.f, 1.5f * F / d, d, dirScreen < 0.f, false, headAt((c[k].x - cx) * rx + (c[k].z - cz) * rz, d));
+        const bool big = c[k].kind == 1;                                    // Bigfoot: 2.4 m tall
+        const uint8_t id = big ? (uint8_t)(T_BIGFOOT0 + c[k].pose % 3) : (uint8_t)(T_DEER0 + (c[k].pose & 3));
+        blitTpl(id, sx, sy + 1.f, (big ? 2.4f : 1.5f) * F / d, d, dirScreen < 0.f, false, headAt((c[k].x - cx) * rx + (c[k].z - cz) * rz, d));
     }
 }
 
@@ -2104,6 +2499,7 @@ void renderInit() {
     }
 #endif
     if (!s_gpat) s_gpat = (uint8_t*)memSlow(W * H);
+    for (int i = 0; i < 32 * 32; i++) s_cloudMap[i] = (uint8_t)(hash32(0xC10D5u + (uint32_t)i * 0x9E3779B1u) >> 24);
     if (!s_tex) {
         s_tex = (uint8_t*)memFast(64 * 64);
         for (int v = 0; v < 64; v++) for (int u = 0; u < 64; u++) {
@@ -2141,6 +2537,14 @@ void renderFrame() {
         s_rdu = hx > 0.38f ? 1 : (hx < -0.38f ? -1 : 0);
         s_rdv = hz > 0.38f ? 1 : (hz < -0.38f ? -1 : 0);
         s_reliefK = s_sunK * (1.f / 45.f);
+        // cloud shadows: more cover, more of the map in shade; none under a clear sky or a full overcast
+        const float cover = g_scene.cloud;
+        s_cloudAmt = s_sunK > 0.2f ? 0.16f * clampf(cover * 3.f, 0.f, 1.f) * clampf((0.9f - cover) * 4.f, 0.f, 1.f) : 0.f;
+        s_cloudThr = 255.f * (1.f - cover * 0.8f) - 20.f;
+        const float drift = (2.f + g_scene.wind * 6.f) * g_scene.dt;      // the shadows move with the wind
+        s_cloudOx -= cosf(g_scene.windAz) * drift; s_cloudOz -= sinf(g_scene.windAz) * drift;
+        if (fabsf(s_cloudOx) > 2240.f * 64.f) s_cloudOx = fmodf(s_cloudOx, 2240.f);   // (the map repeats every 2240 m)
+        if (fabsf(s_cloudOz) > 2240.f * 64.f) s_cloudOz = fmodf(s_cloudOz, 2240.f);
         s_propSh = s_sunK > 0.25f;
         const float rel = wrapPi(sc.sunAz - cyaw), low = clampf(1.f - sc.sunElev / 0.6f, 0.f, 1.f);
         s_propShX = -sinf(rel) * (0.5f + 0.9f * low);       // away from the sun: left when it's to the right
@@ -2164,6 +2568,10 @@ void renderFrame() {
     drawBirds();
     drawRoadStructures();
     drawVegetation();
+    drawFarm();
+    drawArches();
+    drawGeysers();
+    drawRamps();
     drawSignAndStore();
     drawCritters();
     drawParticles();

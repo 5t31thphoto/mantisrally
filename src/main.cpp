@@ -227,6 +227,36 @@ void loop() {
     if (veh == V_VETTE && car.spin > 0.6f && car.surf != SURF_TARMAC && fabsf(car.r) > 1.2f && ((int)(t * 8.f) & 1)) renderSplat(0.3f + car.spin * 0.5f);   // donuts fling mud
     car.evLand = car.evBottom = car.evBump = car.evShift = car.evSplash = 0.f;
 
+    // ---------------- style: airtime and drifts, banked into the Style wallet (the tuning shop's currency) ----------------
+    {   static float airT = 0.f, drift = 0.f, driftOff = 0.f, driftT = 0.f;
+        static char styleBuf[24];
+        const bool crashed = hit.kind == HIT_DEER || hit.strength > 2.f;
+        if (car.air) airT += dt;
+        else if (airT > 0.f) {                                     // down: a clean landing banks the flight
+            if (airT > 0.5f && !crashed && car.evLand < 9.f) {
+                int pts = (int)((airT - 0.3f) * 120.f);
+                progressStyle(pts);
+                snprintf(styleBuf, sizeof styleBuf, "+%d STYLE", pts);
+                message(styleBuf, airT > 1.5f ? "BIG AIR" : "AIRTIME", 1.2f);
+            }
+            airT = 0.f;
+        }
+        // a drift: going forward at 20 mph or more with the car pointing 15 degrees or more off where it's going
+        const float beta = car.u > 1.f ? atan2f(fabsf(car.v), car.u) * 57.2958f : 0.f;
+        if (!car.air && car.u > 9.f && beta > 15.f && beta < 80.f) {
+            drift += dt * (beta - 10.f) * car.speed * 0.11f; driftT += dt; driftOff = 0.f;
+        } else if (drift > 0.f && (driftOff += dt) > 0.4f) {       // held long enough and over: bank it
+            int pts = (int)drift;
+            if (pts >= 20 && driftT > 0.8f) {
+                progressStyle(pts);
+                snprintf(styleBuf, sizeof styleBuf, "+%d STYLE", pts);
+                message(styleBuf, "DRIFT", 1.2f);
+            }
+            drift = 0.f; driftT = 0.f;
+        }
+        if (crashed) { drift = 0.f; driftT = 0.f; }                 // a crash loses the drift in hand
+    }
+
     // ---------------- the road, off-road, water ----------------
     float band = g_prog.offroadOn ? 999.f : V.offroadBand;
     float off = car.mat == MAT_LOT ? 0.f : fabsf(car.across) - car.half;    // the dealership's lot counts as road

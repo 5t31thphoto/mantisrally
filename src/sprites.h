@@ -26,7 +26,8 @@ enum : uint8_t { TM_NONE = 0, TM_LEAF, TM_LEAF2, TM_BARK, TM_ROCK, TM_SNOW, TM_F
 struct Tpl { uint8_t w, h; uint8_t* px; int8_t ax; };   // ax: anchor column (base)
 
 enum : uint8_t { T_PINE0 = 0, T_PINE1, T_PINE2, T_PINESNOW, T_BROAD0, T_BROAD1, T_REDWOOD, T_BUSH, T_CACTUS, T_SNAG, T_BOULDER,
-                 T_FLOWERS, T_STORE, T_DEER0, T_DEER1, T_DEER2, T_DEER3, T_MMSIGN, T_MMSIGN_L, T_TPL_N };
+                 T_FLOWERS, T_STORE, T_DEER0, T_DEER1, T_DEER2, T_DEER3, T_MMSIGN, T_MMSIGN_L,
+                 T_BIGFOOT0, T_BIGFOOT1, T_BIGFOOT2, T_COW0, T_COW1, T_TPL_N };   // cattle: head up, grazing   // Bigfoot: standing, mid-stride, other stride
 const Tpl& tpl(uint8_t id);
 
 

@@ -16,8 +16,11 @@ struct Progress {
     float wallet[V_COUNT];         // unspent miles per vehicle
     uint16_t visited;              // biomes seen (bit per biome)
     bool offroadUnlocked, offroadOn;
+    // ---- added at checkpoint 45 (a 40-byte save from before loads with these zero) ----
+    uint32_t style;                // unspent Style: earned with airtime and drifts, spent on tuning at the dealership
+    uint8_t upg[V_COUNT];          // tuning per vehicle: bits 0-1 handling, 2-3 grip, 4-5 power (vehicleSetUpgrades)
 };
-static_assert(sizeof(Progress) == 40, "the save's size: the radio byte sits in what was padding, old saves still load");
+static_assert(sizeof(Progress) == 48, "the save's size; the first 40 bytes are the old save's, exactly");
 extern Progress g_prog;
 
 void progressInit();               // loads (or starts fresh: the STI)
@@ -27,5 +30,9 @@ int  progressNextLocked();         // the next vehicle for sale (-1: you own the
 bool progressCanBuy(int v);
 bool progressBuy(int v);
 bool progressAllBiomes();
+void progressStyle(int points);    // bank Style (airtime, drifts)
+int  progressUpgradeLevel(int kind);           // the current vehicle's level (0-3) in UPG_*
+int  progressUpgradeCost(int kind);            // Style for its next level (0: maxed)
+bool progressBuyUpgrade(int kind);
 
 }

@@ -62,6 +62,8 @@ static dsp::SVF s_hp;
 static volatile bool s_muted = false;
 static float s_out = 1.f;
 static NatScene s_nat;
+float g_fallsNear = 0.f;
+float g_riverNear = 0.f;                     // set by the renderer: 0..1, a big river within ~160 m                     // set by the renderer: 0..1, a waterfall within ~160 m
 static float s_still = 0.f, s_rainAgo = 999.f;
 
 void audioSetMuted(bool m) { s_muted = m; }
@@ -79,8 +81,8 @@ static void natureScene(int n) {
     s.forestNear = A.pine + A.broad + A.redwood > 0.5f ? 0.8f : 0.2f;
     s.lakeNear = A.water * 0.8f;
     s.oceanNear = sc.biomeA == B_COAST ? 0.8f : 0.f;
-    s.streamNear = (sc.biomeA == B_PINE || sc.biomeA == B_REDWOOD || sc.biomeA == B_AUTUMN) ? 0.25f : 0.f;
-    s.fallsNear = sc.biomeA == B_DEVILS ? 0.2f : 0.f;
+    s.streamNear = fmaxf((sc.biomeA == B_PINE || sc.biomeA == B_REDWOOD || sc.biomeA == B_AUTUMN) ? 0.25f : 0.f, g_riverNear * 0.7f);
+    s.fallsNear = fmaxf(sc.biomeA == B_DEVILS ? 0.2f : 0.f, g_fallsNear * 0.6f);   // and a waterfall in view
     s.open = (sc.biomeA == B_MEADOW || sc.biomeA == B_CANYON || sc.biomeA == B_TUNDRA) ? 1.f : 0.3f;
     s.gust = sc.wind; s.hush = 0.f; s.murmur = 0.f;
     s.frogBoost = sc.biomeA == B_BAYOU ? 1.f : 0.f;

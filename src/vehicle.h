@@ -43,6 +43,9 @@ struct VehicleSpec {
 };
 
 const VehicleSpec& vehicleSpec(uint8_t id);
+// the dealership's tuning: per vehicle, bits 0-1 handling, 2-3 grip, 4-5 power (levels 0-3); nullptr = none
+enum : uint8_t { UPG_HANDLING = 0, UPG_GRIP, UPG_POWER, UPG_N };
+void vehicleSetUpgrades(const uint8_t* levels);
 
 struct VehicleInput { float steer, throttle, brake; bool handbrake; float airPitch; };
 

@@ -13,6 +13,7 @@ Progress g_prog;
 static float s_unsaved = 0.f;
 static const uint32_t MAGIC = 0x4D52414Cu;   // "MRAL"
 struct Blob { uint32_t magic; Progress p; };
+static const size_t OLD_BLOB = 4 + 40;          // the save before Style and tuning (its fields lead the new one)
 
 // Saved to the SD card (/rally_saves); the internal flash is only a fallback when there is no card.
 // Saves happen on events that matter (buying, switching, a new biome, the off-road switch, leaving the store) and
@@ -25,17 +26,26 @@ static void fresh() {
 void progressInit() {
     fresh();
     Blob b;
+    memset(&b, 0, sizeof(b));
     bool got = storageOk() && storageLoad(&b, sizeof(b)) && b.magic == MAGIC;
+    if (!got && storageOk()) {                           // a save from before Style: the same bytes, shorter
+        memset(&b, 0, sizeof(b));
+        got = storageLoad(&b, OLD_BLOB) && b.magic == MAGIC;
+    }
 #ifndef HOST
     if (!got) {
         Preferences pr;
         if (pr.begin("mrally", true)) {
-            got = pr.getBytes("prog", &b, sizeof(b)) == sizeof(b) && b.magic == MAGIC;
+            memset(&b, 0, sizeof(b));
+            size_t n = pr.getBytes("prog", &b, sizeof(b));
+            got = (n == sizeof(b) || n == OLD_BLOB) && b.magic == MAGIC;
             pr.end();
         }
     }
 #endif
     if (got) g_prog = b.p;
+    for (int v = 0; v < V_COUNT; v++) g_prog.upg[v] &= 0x3F;
+    vehicleSetUpgrades(g_prog.upg);
     g_prog.owned |= 1u << V_STI;
     if (!(g_prog.owned & (1u << g_prog.current))) g_prog.current = V_STI;
 }
@@ -75,6 +85,32 @@ bool progressBuy(int v) {
     g_prog.wallet[S.priceVehicle] -= S.priceMiles;
     g_prog.owned |= (uint8_t)(1u << v);
     g_prog.current = (uint8_t)v;
+    progressSave();
+    return true;
+}
+static int s_styleUnsaved = 0;
+void progressStyle(int pts) {
+    if (pts <= 0) return;
+    g_prog.style = g_prog.style + (uint32_t)pts > 9999999u ? 9999999u : g_prog.style + (uint32_t)pts;
+    s_styleUnsaved += pts;
+    if (s_styleUnsaved > 1500) { s_styleUnsaved = 0; progressSave(); }
+}
+int progressUpgradeLevel(int kind) {
+    if (kind < 0 || kind >= UPG_N) return 0;
+    return (g_prog.upg[g_prog.current % V_COUNT] >> (kind * 2)) & 3;
+}
+int progressUpgradeCost(int kind) {
+    static const int COST[3] = {400, 900, 1800};
+    int l = progressUpgradeLevel(kind);
+    return l >= 3 ? 0 : COST[l];
+}
+bool progressBuyUpgrade(int kind) {
+    int c = progressUpgradeCost(kind);
+    if (c <= 0 || g_prog.style < (uint32_t)c) return false;
+    g_prog.style -= (uint32_t)c;
+    uint8_t& u = g_prog.upg[g_prog.current % V_COUNT];
+    u = (uint8_t)((u & ~(3u << (kind * 2))) | ((progressUpgradeLevel(kind) + 1) << (kind * 2)));
+    vehicleSetUpgrades(g_prog.upg);
     progressSave();
     return true;
 }

@@ -13,50 +13,26 @@ static constexpr float G = 9.81f;
 static inline float wrapPiF(float a) { while (a > 3.14159265f) a -= 6.2831853f; while (a < -3.14159265f) a += 6.2831853f; return a; }
 
 //                   tarmac gravel dirt  mud   snow  sand  grass rock
-static const VehicleSpec VEHICLES[V_COUNT] = {
-    { "MANTIS STI", "STI", "2013 HATCH. AWD. TURBO FLAT FOUR.", "PACE NOTES, LAUNCH CONTROL", false,
-      1480.f, 2.62f, 0.60f, 0.50f, 1.53f, 1.05f,
-      30.f, 26.f, 3.4f, 0.55f,
-      ENG_BOXER4T, 410.f, 4000.f, 850.f, 6900.f, 3600.f, 0.45f,
-      6, {3.64f, 2.24f, 1.52f, 1.14f, 0.97f, 0.76f}, 3.90f, 0.32f, 0.11f,
-      DRIVE_AWD, 0.41f, 1.10f, 0.62f, true,
-      {1.00f, 0.92f, 0.87f, 0.62f, 0.56f, 0.62f, 0.64f, 0.76f}, 1.55f, 1.28f, 0.115f, 1.0f,
-      0.78f, 2.1f, 0.62f, 0.50f, 0.17f,
-      3.0f, 0.35f, 1.18f, 0.0f, COCKPIT_RALLY,
-      V_STI, 0.f, 0.80f, 0.85f, 0.35f },
-    { "OLD JEEP 4.0", "JEEP", "1993 4.0 SIX. PART-TIME 4X4.", "SOME ROADS AREN'T ON ANY MAP.", false,
-      1520.f, 2.37f, 0.54f, 0.78f, 1.48f, 1.10f,
-      34.f, 17.f, 1.8f, 0.30f,
-      ENG_I6, 310.f, 2800.f, 700.f, 5000.f, 2000.f, 0.f,
-      5, {3.83f, 2.45f, 1.56f, 1.00f, 0.79f, 0.f}, 4.10f, 0.39f, 0.22f,
-      DRIVE_4WD, 0.50f, 0.85f, 0.65f, false,
-      {0.84f, 0.88f, 0.90f, 0.84f, 0.70f, 0.82f, 0.82f, 0.95f}, 1.40f, 1.18f, 0.16f, 0.45f,
-      1.20f, 1.25f, 0.24f, 0.62f, 0.30f,
-      45.f, 0.85f, 1.62f, 0.0f, COCKPIT_JEEP,
-      V_STI, 20.f, 0.45f, 0.60f, 0.85f },
-    { "STINGRAY BAJA", "VETTE", "LIFTED V8 ON ALL-TERRAINS. RWD.", "WHY TAKE THE LONG WAY ROUND?", false,
-      1450.f, 2.49f, 0.50f, 0.66f, 1.58f, 1.0f,
-      32.f, 30.f, 3.9f, 0.30f,
-      ENG_V8, 900.f, 4400.f, 750.f, 6600.f, 3000.f, 0.f,
-      5, {2.64f, 1.75f, 1.34f, 1.00f, 0.78f, 0.f}, 3.55f, 0.40f, 0.14f,
-      DRIVE_RWD, 0.0f, 1.15f, 0.60f, true,
-      {1.55f, 1.32f, 1.32f, 1.12f, 0.88f, 1.25f, 1.18f, 1.25f}, 1.50f, 1.20f, 0.17f, 0.50f,   // grip to match 900 Nm: insane traction
-      0.86f, 1.40f, 0.55f, 0.60f, 0.40f,
-      18.f, 0.45f, 1.38f, 0.0f, COCKPIT_VETTE,
-      V_JEEP, 40.f, 1.0f, 0.95f, 0.60f },
-    { "CR250 DIRT BIKE", "BIKE", "TWO-STROKE 250. KNOBBIES.", "WHAT IF THE ROAD WAS OPTIONAL?", true,
-      190.f, 1.48f, 0.47f, 0.95f, 0.20f, 0.7f,
-      32.f, 22.f, 6.0f, 0.25f,
-      ENG_2STROKE, 48.f, 8000.f, 1600.f, 10000.f, 5000.f, 0.f,
-      5, {2.20f, 1.68f, 1.36f, 1.13f, 0.96f, 0.f}, 11.8f, 0.33f, 0.06f,
-      DRIVE_RWD, 0.0f, 1.05f, 0.65f, true,
-      {0.92f, 0.95f, 1.00f, 0.86f, 0.70f, 0.88f, 0.94f, 0.92f}, 1.45f, 1.20f, 0.15f, 0.45f,
-      0.55f, 1.20f, 0.50f, 0.55f, 0.40f,
-      999.f, 0.60f, 1.52f, 0.25f, COCKPIT_BIKE,
-      V_VETTE, 60.f, 0.85f, 0.80f, 1.0f },
-};
+#include "vehicle_tuning.h"                         // every vehicle's numbers, by name
+static const VehicleSpec VEHICLES[V_COUNT] = { tuneSti(), tuneJeep(), tuneVette(), tuneBike() };
 
-const VehicleSpec& vehicleSpec(uint8_t id) { return VEHICLES[id % V_COUNT]; }
+// The dealership's tuning (bought with Style): each vehicle's table with its upgrades applied. Level 0 is the table
+// exactly. Handling: more lock (+8%), more of it kept at speed (+12%) and a quicker rack (+15%) a level. Grip: +5%
+// on every surface a level. Power: +7% torque a level.
+static VehicleSpec s_tuned[V_COUNT];
+static bool s_tunedOk = false;
+void vehicleSetUpgrades(const uint8_t* lv) {
+    for (int v = 0; v < V_COUNT; v++) {
+        VehicleSpec s = VEHICLES[v];
+        const int h = lv ? (lv[v] & 3) : 0, g = lv ? ((lv[v] >> 2) & 3) : 0, p = lv ? ((lv[v] >> 4) & 3) : 0;
+        s.lockDeg *= 1.f + 0.08f * h; s.steerRefSpeed *= 1.f + 0.12f * h; s.steerRate *= 1.f + 0.15f * h;
+        for (int i = 0; i < 8; i++) s.mu[i] *= 1.f + 0.05f * g;
+        s.torque *= 1.f + 0.07f * p;
+        s_tuned[v] = s;
+    }
+    s_tunedOk = true;
+}
+const VehicleSpec& vehicleSpec(uint8_t id) { if (!s_tunedOk) vehicleSetUpgrades(nullptr); return s_tuned[id % V_COUNT]; }
 
 static float rollRes(uint8_t surf) {
     static const float RR[8] = {0.014f, 0.03f, 0.035f, 0.11f, 0.06f, 0.13f, 0.06f, 0.035f};

@@ -205,6 +205,46 @@ static void makeDeer(uint8_t id, int pose, uint32_t seed) {
     T->ax = 10;
 }
 
+// Bigfoot: tall, dark, hairy, hunched, long arms. Pose 0 stands and watches; 1 and 2 are the two halves of a stride.
+static void makeBigfoot(uint8_t id, int pose) {
+    tNew(id, 14, 27);
+    const uint32_t sd = 0xB16F007u;
+    const float st = pose == 0 ? 0.f : (pose == 1 ? 1.6f : -1.6f);
+    tLine(5.f, 17.f, 5.f - st, 26.f, 1.7f, 1.3f, TM_BARK, 3, sd + 1);            // legs
+    tLine(9.f, 17.f, 9.f + st, 26.f, 1.7f, 1.3f, TM_BARK, 4, sd + 2);
+    tDisc(7.f, 12.f, 4.6f, 6.5f, TM_BARK, 4.f, sd, 0.35f);                         // broad, shaggy body
+    tLine(2.6f, 8.f, 2.f + st * 0.8f, 19.f, 1.4f, 1.1f, TM_BARK, 3, sd + 3);      // long arms, swinging against the legs
+    tLine(11.4f, 8.f, 12.f - st * 0.8f, 19.f, 1.4f, 1.1f, TM_BARK, 5, sd + 4);
+    tDisc(7.5f, 4.f, 2.6f, 2.8f, TM_BARK, 5.f, sd + 5, 0.3f);                      // head, sunk into the shoulders
+    T->ax = 7;
+}
+
+// A cow, side on (facing right): a deep, boxy body, black with white patches (or all red-brown), on four short legs.
+// Pose 0 stands with its head up; pose 1 grazes.
+static void makeCow(uint8_t id, int pose) {
+    tNew(id, 24, 15);
+    const uint32_t sd = 0xC0FFEEu;
+    for (int i = 0; i < 4; i++) {                                   // legs
+        float lx = i < 2 ? 4.5f + i * 2.f : 15.f + (i - 2) * 2.f;
+        tLine(lx, 9.f, lx, 14.f, 0.7f, 0.6f, TM_BARK, i & 1 ? 2 : 3, sd + i);
+    }
+    tDisc(10.5f, 6.5f, 8.5f, 3.8f, TM_BARK, 3.f, sd + 7, 0.08f);  // body
+    tDisc(7.f, 5.5f, 2.6f, 2.f, TM_SNOW, 12.f, sd + 8, 0.3f);      // patches
+    tDisc(14.f, 8.f, 2.2f, 1.6f, TM_SNOW, 11.f, sd + 9, 0.3f);
+    tDisc(12.f, 10.f, 2.f, 0.9f, TM_SNOW, 13.f, sd + 10, 0.f);    // udder side, pale
+    tp(2, 4, TM_BARK, 3); tp(1, 5, TM_BARK, 3); tp(1, 6, TM_BARK, 2); tp(1, 7, TM_SNOW, 12);   // tail
+    if (pose == 0) {
+        tLine(18.5f, 5.f, 20.5f, 3.f, 1.6f, 1.4f, TM_BARK, 3, sd + 11);
+        tDisc(21.5f, 3.5f, 2.f, 1.6f, TM_BARK, 4.f, sd + 12, 0.f);
+        tp(23, 4, TM_SNOW, 13); tp(20, 1, TM_BARK, 2); tp(22, 1, TM_SNOW, 14);   // muzzle, ear, horn
+    } else {
+        tLine(18.5f, 6.f, 21.f, 11.f, 1.6f, 1.3f, TM_BARK, 3, sd + 11);
+        tDisc(21.5f, 12.f, 1.8f, 1.7f, TM_BARK, 4.f, sd + 12, 0.f);
+        tp(22, 13, TM_SNOW, 13); tp(20, 10, TM_BARK, 2);
+    }
+    T->ax = 11;
+}
+
 const Tpl& tpl(uint8_t id) { return s_tpl[id % T_TPL_N]; }
 
 void spritesInit() {
@@ -224,6 +264,8 @@ void spritesInit() {
     makeFlowers(T_FLOWERS, 157);
     makeStore();
     for (int p = 0; p < 4; p++) makeDeer((uint8_t)(T_DEER0 + p), p, 1);
+    for (int p = 0; p < 3; p++) makeBigfoot((uint8_t)(T_BIGFOOT0 + p), p);
+    makeCow(T_COW0, 0); makeCow(T_COW1, 1);
     // the MANTIS MOTORS arrow (from the sign sheet: tools/sprites/make_store_art.py)
     s_tpl[T_MMSIGN].w = art::MM_SIGN_W; s_tpl[T_MMSIGN].h = art::MM_SIGN_H; s_tpl[T_MMSIGN].ax = (int8_t)art::MM_SIGN_AX;
     s_tpl[T_MMSIGN].px = const_cast<uint8_t*>(art::MM_SIGN);

@@ -44,6 +44,52 @@ float terrainNatural(float x, float z) {
     return h;
 }
 
+// ---- big rivers: winding contour lines of a very slow noise (about one a kilometre), carved below the water table so
+// the lakes' own rules fill them: one level, banks above it. A 22 m channel, then the valley: gentle in soft country,
+// sheer walls (a gorge) where the land is rocky or desert. The road follows the land as it was (it doesn't dive in):
+// where the river is carved under it, it bridges (genStep).
+// how sheer the valley's walls are, 0 (soft) to 1 (a gorge): smooth in the land's numbers, so a biome blend eases it
+static inline float riverGorge(const Land& L) {
+    return clampf(fmaxf(fmaxf((L.cliff - 0.2f) * 2.5f, (L.ridge - 0.4f) * 2.5f), L.ground == MAT_SAND ? 1.f : 0.f), 0.f, 1.f);
+}
+// The rivers are filled by the lakes' rule (one level for all the water that touches): that holds while the base plane
+// lies (nearly) flat. While it leans (a biome blending into one at another height) the water table leans with it, so
+// the rivers fade out (shallow dry valleys, then nothing) rather than stand at one level up a slope.
+static float riverK() { return clampf(1.f - (journeyTilt() - 0.003f) * (1.f / 0.003f), 0.f, 1.f); }
+static float riverSd(float x, float z, float& ux, float& uz) {     // signed distance to the river's centre line (m)
+    if (riverK() <= 0.f) { ux = uz = 0.f; return 1e4f; }
+    const uint32_t salt = s_seed + 0x41A3u;
+    float n = fbm2(x * 0.0011f, z * 0.0011f, 2, salt) - 0.5f;
+    ux = uz = 0.f;
+    if (fabsf(n) > 0.3f) return n > 0.f ? 1e4f : -1e4f;           // nowhere near one (100 m and more)
+    float gx = fbm2((x + 4.f) * 0.0011f, z * 0.0011f, 2, salt) - 0.5f - n, gz = fbm2(x * 0.0011f, (z + 4.f) * 0.0011f, 2, salt) - 0.5f - n;
+    float gl = sqrtf(gx * gx + gz * gz) * 0.25f;                   // per metre
+    if (gl < 1e-6f) return n > 0.f ? 1e4f : -1e4f;
+    ux = gx * 0.25f / gl; uz = gz * 0.25f / gl;
+    return n / gl;
+}
+static float riverProfile(float d, float wl, float gorge) {          // the carved land's height d metres from the centre
+    const float W = 11.f;
+    if (d < W - 3.f) return wl - 2.5f;
+    if (d < W) return wl - 2.5f + (d - (W - 3.f)) * (3.3f / 3.f);  // the bank, up to 0.8 m above the water
+    return wl + 0.8f + (d - W) * (0.32f + 2.08f * gorge);
+}
+// the land with the river carved in (n: the natural height at (x, z))
+static inline float riverCarve(float n, float sd, float wl, float gorge) {
+    const float d = fabsf(sd);
+    if (d > 75.f) return n;
+    float c = riverProfile(d, wl, gorge);
+    if (c >= n) return n;
+    return n - (n - c) * (1.f - (1.f - gorge) * smooth01((d - 45.f) * (1.f / 30.f))) * riverK();   // a soft valley eases out into the hills
+}
+float terrainRiverDepth(float x, float z) {                       // how far the river's valley is carved below the land
+    float ux, uz, sd = riverSd(x, z, ux, uz);
+    if (fabsf(sd) > 75.f) return 0.f;
+    float n = terrainNatural(x, z);
+    return n - riverCarve(n, sd, terrainWaterLevel(x, z), riverGorge(journeyLand()));
+}
+float terrainRiverDist(float x, float z) { float ux, uz; return fabsf(riverSd(x, z, ux, uz)); }
+
 // =====================================================================================================
 //  Road deque
 // =====================================================================================================
@@ -63,6 +109,7 @@ struct Gen {
     float sinceJunc, nextJunc, sinceStore, nextStore;
     uint32_t rng;
     int lockGrade;                       // nodes left on a fixed grade (the two arms of a fork stay level together)
+    int tunN;                            // nodes of the tunnel being bored (0: none); a long one breaks out into a cut
     // meeting other stretches of road (see crossCheck): one meeting with the road itself, one with the arm (a knot
     // can be both at once): what is being built there, and where along the other road
     struct Meet {
@@ -139,6 +186,15 @@ static void newSegment(Gen& g, float h) {
     }
 }
 
+static bool otherRoadNear(const RoadNode& n, bool arm, float r);
+#ifndef TUN_START
+#define TUN_START 13.f                   // metres of land over the road for a tunnel to begin ...
+#define TUN_HOLD 8.f                     // ... and to carry on
+#endif
+#ifndef TUN_MAX
+#define TUN_MAX 60                       // the longest tunnel (nodes: 180 m) ...
+#define TUN_GAP 70                       // ... and open road after one before the next (210 m)
+#endif
 // One node outward from `from`. outward heading = from.yaw (front) or from.yaw + pi (back).
 static RoadNode genStep(Gen& g, const RoadNode& from, int dir) {
     const Land& L = journeyLand();
@@ -182,6 +238,18 @@ static RoadNode genStep(Gen& g, const RoadNode& from, int dir) {
     n.half20 = (uint8_t)clampf(L.roadHalf * 20.f, 40.f, 120.f);
     n.flags = g.crestLeft > 0.f && g.crestAmp > 0.f ? RN_CREST : 0;
     n.side = 0;
+    // a river carved below: the road crosses it on a bridge at the land's old height (the land under a deck is left be)
+    const float rd = terrainRiverDepth(n.x, n.z);
+    if (rd > 1.5f && terrainNatural(n.x, n.z) - rd < n.y - 2.f && !otherRoadNear(n, &g == &s_gA, 35.f)) {   // (only where it opens
+        n.flags = RN_BRIDGE; n.side = RN_SIDE_RIVER;                                           // under the road, and clear of
+    }                                                                                          // other roads: their crossing comes first)
+    else {                                                        // a deep cut through a ridge: a tunnel (once in, held to 5 m)
+        const float px = -sinf(n.yaw), pz = cosf(n.yaw), w = n.half20 * 0.05f + 5.f;
+        float cover = fminf(terrainNatural(n.x, n.z), fminf(terrainNatural(n.x + px * w, n.z + pz * w), terrainNatural(n.x - px * w, n.z - pz * w))) - n.y;
+        const bool in = (from.flags & RN_TUNNEL) && g.tunN > 0;
+        if (cover > (in ? TUN_HOLD : TUN_START) && !(in && g.tunN >= TUN_MAX) && !(!in && g.tunN < 0)) { n.flags = RN_TUNNEL; g.tunN = in ? g.tunN + 1 : 1; }
+        else g.tunN = in ? -TUN_GAP : (g.tunN < 0 ? g.tunN + 1 : 0);   // after one: open sky for a while
+    }
     g.sinceJunc += ROAD_DS;
     g.sinceStore += ROAD_DS;
     return n;
@@ -225,7 +293,15 @@ static float segProject(const RoadNode& a, const RoadNode& b, float x, float z, 
 
 // a stretch of one road left out of the nearest-point search (a deck's own approaches, when looking for what's under it)
 static struct { bool on, arm; float s0, s1; } s_ex = {false, false, 0.f, 0.f};
-static bool nearestOn(bool arm, int n, float x, float z, RoadHit& out, float maxD2, uint8_t skip = 0) {
+static bool nearestOn(bool arm, int n, float x, float z, RoadHit& out, float maxD2, uint8_t skip = 0);
+static bool otherRoadNear(const RoadNode& n, bool arm, float r) {   // any road within r but this one's own stretch
+    RoadHit rh;
+    s_ex.on = true; s_ex.arm = arm; s_ex.s0 = n.s - 90.f; s_ex.s1 = n.s + 90.f;
+    bool hit = roadNearest(n.x, n.z, rh, r);
+    s_ex.on = false;
+    return hit;
+}
+static bool nearestOn(bool arm, int n, float x, float z, RoadHit& out, float maxD2, uint8_t skip) {
     if (n < 2) return false;
     // coarse pass every 4th node; keep the 3 best local minima (switchback legs are separate minima),
     // then refine each exactly against its segments
@@ -837,7 +913,8 @@ static void extend(int dir, bool facing) {
     crossCheck(g, false, dir);                                  // meeting another stretch of road (heights, flags only)
     rebakeAround(n.x, n.z, n.half20 * 0.05f + 10.f);           // the road may wind back into land already dreamt
     if (!facing) return;
-    bool calm = fabsf(g.curv) < 1.f / 140.f && g.pending == 0 && g.seg != SEG_HAIRPIN;
+    bool calm = fabsf(g.curv) < 1.f / 140.f && g.pending == 0 && g.seg != SEG_HAIRPIN
+                && !(n.flags & (RN_BRIDGE | RN_TUNNEL)) && terrainRiverDist(n.x, n.z) > 90.f;   // never on a bridge, in a tunnel, or by a river
     if (s_storePending) {                                   // the sign is up: the store comes a quarter mile on
         if (dir == s_storeDir && (n.s - s_storeAtS) * dir >= 0.f && calm && roomAround(n, dir, 70.f)) spawnStore(dir);   // its lot needs room too
         return;                                             // (and no fork between a sign and its store)
@@ -929,6 +1006,15 @@ static float cutH(float nat, float a, float half, float roadY, bool paved, float
     return roadY - 0.13f + (nat - roadY + 0.13f) * ts + ditch;
 }
 
+// a cell beside a singletrack: a tree (or in open country a boulder) most of the time, close enough that a car won't fit
+static uint8_t lineVeg(int ci, int cj, const Land& L) {
+    uint32_t h = hash32((uint32_t)ci * 0x2C1B3C6Du ^ (uint32_t)cj * 0x297A2D39u ^ s_seed ^ 0x51E7u);
+    if (hashf(h) > 0.8f) return VEG_NONE;
+    const float forest = L.pine + L.broad + L.redwood;
+    if (forest < 0.3f) return L.cactus > 0.3f && (h & 256) ? VEG_CACTUS : VEG_BOULDER;
+    float r = hashf(h >> 7) * forest;
+    return r < L.pine ? VEG_PINE : (r < L.pine + L.broad ? VEG_BROAD : VEG_REDWOOD);
+}
 static uint8_t pickVeg(float x, float z, int ci, int cj, uint8_t mat, float aRoad, float half) {
     const Land& L = journeyLand();
     if (mat == MAT_ROAD || mat == MAT_SHOULDER || mat == MAT_LOT || mat == MAT_WATER) return VEG_NONE;
@@ -949,6 +1035,129 @@ static uint8_t pickVeg(float x, float z, int ci, int cj, uint8_t mat, float aRoa
     acc += L.bush * k * 0.6f;            if (r < acc) return mat == MAT_SNOW ? VEG_NONE : VEG_BUSH;
     acc += L.flowers * k * 0.9f;         if (r < acc) return (mat == MAT_GRASS) ? VEG_FLOWERS : VEG_NONE;
     return VEG_NONE;
+}
+
+// ---- farm plots: open, gentle grass country is parcelled into 56 m plots; some are planted (corn, potatoes or grain),
+// some fenced as pasture (cattle), each with a 3 m grass headland. The code a plot's cells keep in Cell::extra (0: not
+// farmed): bit 7 farmed, bits 5-6 the use (0 corn, 1 potatoes, 2 grain, 3 pasture), bit 4 the rows' heading. Its low
+// nibble (vegetation) stays 0: nothing grows in it.
+uint8_t terrainPlot(int pi, int pj) {
+    const Land& L = journeyLand();
+    if (L.ground != MAT_GRASS) return 0;
+    float farm = clampf((0.6f - (L.pine + L.broad + L.redwood)) * 2.5f, 0.f, 1.f) * clampf((24.f - L.hills) * 0.1f, 0.f, 1.f);
+    if (farm <= 0.f) return 0;
+    uint32_t hp = hash32((uint32_t)pi * 0x9E3779B1u ^ (uint32_t)pj * 0x85EBCA77u ^ s_seed ^ 0xFA4Du);
+    float r = hashf(hp);
+    if (r >= 0.65f * farm) return 0;
+    uint8_t kind = r < 0.45f * farm ? (uint8_t)((hp >> 8) % 3u) : 3;
+    return (uint8_t)(0x80 | (kind << 5) | (((hp >> 12) & 1u) << 4));
+}
+static uint8_t cropAt(float x, float z) {
+    if (s_store.active && sq(x - s_store.x) + sq(z - s_store.z) < 60.f * 60.f) return 0;
+    const float P = PLOT_M;
+    float fi = floorf(x * (1.f / P)), fj = floorf(z * (1.f / P));
+    float u = x - fi * P, v = z - fj * P;
+    if (u < 3.f || v < 3.f || u > P - 3.f || v > P - 3.f) return 0;     // the headland
+    return terrainPlot((int)fi, (int)fj);
+}
+uint8_t terrainNearExtra(float x, float z) {
+    const Grid& g = s_near;
+    if (!g.c) return 0;
+    int i = (int)floorf(x * g.inv + 0.5f), j = (int)floorf(z * g.inv + 0.5f);   // the cell whose sample point is nearest
+    if (i < g.ox || j < g.oz || i >= g.ox + g.N || j >= g.oz + g.N) return 0;
+    const Cell& c = g.c[gridWrap(j, g.N) * g.N + gridWrap(i, g.N)];
+    return (c.mat & 15) < MAT_WATER ? c.extra : 0;
+}
+
+// ---- backcountry trails, two kinds, only out in the land (not in snow or wet country):
+//  - off-road trails for anything: winding contour lines of a slow noise, from 15 m off a road out, about 5 m
+//    wide (the distance to the contour, by the noise's gradient). Jumps on a 32 m lattice: tabletops, and timber-
+//    railed launch ramps that face along the trail.
+//  - singletrack for dirt bikes: a faster-winding noise's contours where no road comes within 120 m, a cell wide
+//    (about 2.5 m), lined close on both sides with trees (or boulders in open country): a car doesn't fit. Small,
+//    steep kickers on a 20 m lattice.
+static float contourDist(float x, float z, float f, uint32_t salt) {
+    float n = fbm2(x * f, z * f, 2, salt);
+    if (fabsf(n - 0.5f) > 0.12f) return 1e9f;                          // (far from any: no gradient needed)
+    float gx = fbm2((x + 1.f) * f, z * f, 2, salt) - n, gz = fbm2(x * f, (z + 1.f) * f, 2, salt) - n;
+    float gl = sqrtf(gx * gx + gz * gz);
+    return gl > 1e-5f ? fabsf(n - 0.5f) / gl : 1e9f;
+}
+static void contourDir(float x, float z, float f, uint32_t salt, float& ux, float& uz) {   // along the contour
+    float gx = fbm2((x + 1.f) * f, z * f, 2, salt) - fbm2((x - 1.f) * f, z * f, 2, salt);
+    float gz = fbm2(x * f, (z + 1.f) * f, 2, salt) - fbm2(x * f, (z - 1.f) * f, 2, salt);
+    float gl = sqrtf(gx * gx + gz * gz);
+    if (gl < 1e-7f) { ux = 1.f; uz = 0.f; return; }
+    ux = -gz / gl; uz = gx / gl;
+}
+static constexpr float TRAIL_F = 0.004f, BIKE_F = 0.0065f;
+static inline uint32_t trailSalt() { return s_seed + 0x7A1Eu; }
+static inline uint32_t bikeSalt() { return s_seed + 0x8B1Eu; }
+static float trailDist(float x, float z) { return contourDist(x, z, TRAIL_F, trailSalt()); }
+static float bikeDist(float x, float z) { return contourDist(x, z, BIKE_F, bikeSalt()); }
+static bool trailLand(const Land& L) { return L.ground != MAT_SNOW && L.water < 0.6f; }
+// the off-road trail's jump in lattice cell (li, lj): 0 none, 1 a tabletop at (jx, jz), 2 a launch ramp (r)
+static int trailJump(int li, int lj, float& jx, float& jz, Ramp* r) {
+    const float Q = RAMP_LATTICE;
+    uint32_t hj = hash32((uint32_t)li * 0x27D4EB2Fu ^ (uint32_t)lj * 0x165667B1u ^ s_seed ^ 0x1D2Eu);
+    if (hashf(hj) > 0.55f) return 0;
+    const bool ramp = ((hj >> 4) & 7u) < 3u;                           // 3 in 8 are launch ramps
+    const float off = ramp ? 12.f : 6.f, span = ramp ? 8.f : 20.f;     // (a ramp's run-up stays in its own cell)
+    jx = li * Q + off + span * ((hj >> 8) & 255) * (1.f / 255.f); jz = lj * Q + off + span * ((hj >> 16) & 255) * (1.f / 255.f);
+    if (trailDist(jx, jz) > 1.2f) return 0;
+    if (!ramp) return 1;
+    if (r) {
+        r->x = jx; r->z = jz; contourDir(jx, jz, TRAIL_F, trailSalt(), r->ux, r->uz);
+        if (hj & 0x40000000u) { r->ux = -r->ux; r->uz = -r->uz; }      // either way along the trail
+    }
+    return 2;
+}
+static float jumpAt(float x, float z) {                          // a 1.6 m tabletop, 4.5 m round
+    int li = (int)floorf(x * (1.f / RAMP_LATTICE)), lj = (int)floorf(z * (1.f / RAMP_LATTICE));
+    float jx, jz;
+    if (trailJump(li, lj, jx, jz, nullptr) != 1) return 0.f;
+    float r = sqrtf(sq(x - jx) + sq(z - jz));
+    if (r >= 4.5f) return 0.f;
+    return 1.6f * smooth01((1.f - r * (1.f / 4.5f)) * 1.7f);
+}
+static float bikeJumpAt(float x, float z) {                      // a kicker 1.1 m high, 2.6 m round, steep
+    const float Q = 20.f;
+    float fi = floorf(x * (1.f / Q)), fj = floorf(z * (1.f / Q));
+    uint32_t hj = hash32((uint32_t)(int)fi * 0x3C6EF372u ^ (uint32_t)(int)fj * 0xA54FF53Au ^ s_seed ^ 0xB1CEu);
+    if (hashf(hj) > 0.6f) return 0.f;
+    float jx = fi * Q + 4.f + 12.f * ((hj >> 8) & 255) * (1.f / 255.f), jz = fj * Q + 4.f + 12.f * ((hj >> 16) & 255) * (1.f / 255.f);
+    float r = sqrtf(sq(x - jx) + sq(z - jz));
+    if (r >= 2.6f || bikeDist(jx, jz) > 0.9f) return 0.f;
+    return 1.1f * smooth01((1.f - r * (1.f / 2.6f)) * 2.2f);
+}
+
+// ---- launch ramps: on the off-road trails (above). A dirt kicker 5 m wide: an 11 m run-up rising 3 m, then a
+// 2.5 m drop off the back; no road within 24 m of its lip.
+bool terrainRamp(int li, int lj, Ramp& r, bool checkRoad) {
+    const Land& L = journeyLand();
+    if (!trailLand(L)) return false;
+    float jx, jz;
+    if (trailJump(li, lj, jx, jz, &r) != 2) return false;
+    if (s_store.active && sq(r.x - s_store.x) + sq(r.z - s_store.z) < 80.f * 80.f) return false;
+    if (checkRoad) { RoadHit rh; if (roadNearest(r.x, r.z, rh, 24.f)) return false; }
+    return true;
+}
+static float rampAt(float x, float z, const Ramp& r) {          // the kicker's height above the land at (x, z)
+    float dx = x - r.x, dz = z - r.z;
+    float a = dx * r.ux + dz * r.uz, c = fabsf(dz * r.ux - dx * r.uz);
+    if (c >= 3.5f || a <= -11.f || a >= 2.5f) return 0.f;
+    float hh = a <= 0.f ? 3.f * (a + 11.f) * (1.f / 11.f) : 3.f * (1.f - a * (1.f / 2.5f));
+    return hh * smooth01((3.5f - c) * 1.2f);
+}
+
+// ---- waterfalls: in wet country, one candidate cell in each 16 x 16 block of near cells; it falls if that cell is a
+// steep rock face. The renderer finds the drop below it.
+static bool fallAt(int ci, int cj, const Land& L) {
+    if (L.ground != MAT_GRASS || L.water + L.pine + L.redwood + L.broad * 0.6f < 0.7f) return false;
+    int bi = ci >> 4, bj = cj >> 4;
+    uint32_t hb = hash32((uint32_t)bi * 0x9E3779B1u ^ (uint32_t)bj * 0x7FEB352Du ^ s_seed ^ 0xFA11u);
+    if (hashf(hb) > 0.7f) return false;
+    return ci - (bi << 4) == (int)((hb >> 8) & 15u) && cj - (bj << 4) == (int)((hb >> 16) & 15u);
 }
 
 #ifdef DEBUG_BAKE
@@ -992,7 +1201,9 @@ static void shadowCell(Grid& g, int ci, int cj) {
     const int N = g.N;
     const int k = gridWrap(cj, N) * N + gridWrap(ci, N);
     bool shade = false;
-    if (s_sunUp) {
+    const int cm = g.c[k].mat & 15;
+    if ((cm == MAT_ROAD || cm == MAT_SHOULDER) && (g.c[k].extra & 0x80)) shade = true;   // under a tunnel's roof
+    else if (s_sunUp) {
         const float h0 = g.c[k].h * 0.1f + 0.5f;                 // half a metre: no shade from the cell's own grain
         static const uint8_t D[12] = {1, 2, 3, 4, 6, 8, 11, 15, 20, 26, 33, 42};
         for (int s = 0; s < 12; s++) {
@@ -1015,12 +1226,85 @@ static void shadowStep(Grid& g, int n) {                         // the slow swe
     }
 }
 
+// a field's crop, standing on the soil: corn 1 m, grain 0.5 m (the cell is drawn that much higher; terrainGround
+// takes it back off for the wheels)
+static inline float cropRaise(const Cell& k) {
+    if ((k.mat & 15) != MAT_SOIL || !(k.extra & 0x80)) return 0.f;
+    const int kind = (k.extra >> 5) & 3;
+    return kind == 0 ? 1.f : (kind == 2 ? 0.5f : 0.f);
+}
+// ---- the jumps near the car, exactly. The cells (2.5 m) round off a kicker's lip, so the wheels would roll over it;
+// terrainGround puts the exact shape back (the land as baked, less the jump as the cells have it, plus the jump as it
+// is). Refreshed as the car moves.
+struct Feat { uint8_t kind; float x, z; Ramp r; };            // kind 1 tabletop, 2 launch ramp, 3 singletrack kicker
+static Feat s_feat[12]; static int s_featN = 0; static float s_featX = 1e9f, s_featZ = 1e9f;
+static float featH(const Feat& f, float x, float z) {
+    if (f.kind == 2) return rampAt(x, z, f.r);
+    const float R = f.kind == 1 ? 4.5f : 2.6f, H = f.kind == 1 ? 1.6f : 1.1f, K = f.kind == 1 ? 1.7f : 2.2f;
+    float d = sqrtf(sq(x - f.x) + sq(z - f.z));
+    return d >= R ? 0.f : H * smooth01((1.f - d / R) * K);
+}
+static void featRefresh(float cx, float cz) {
+    if (sq(cx - s_featX) + sq(cz - s_featZ) < 8.f * 8.f) return;
+    s_featX = cx; s_featZ = cz; s_featN = 0;
+    const Land& L = journeyLand();
+    if (!trailLand(L)) return;
+    const float R = 70.f;
+    for (int lj = (int)floorf((cz - R) / RAMP_LATTICE); lj <= (int)floorf((cz + R) / RAMP_LATTICE); lj++)
+        for (int li = (int)floorf((cx - R) / RAMP_LATTICE); li <= (int)floorf((cx + R) / RAMP_LATTICE); li++) {
+            if (s_featN >= 12) return;
+            Feat f; float jx, jz;
+            int k = trailJump(li, lj, jx, jz, &f.r);
+            if (!k) continue;
+            RoadHit rh;
+            if (roadNearest(jx, jz, rh, k == 2 ? 24.f : 15.f)) continue;
+            f.kind = (uint8_t)k; f.x = jx; f.z = jz;
+            s_feat[s_featN++] = f;
+        }
+    const float Q = 20.f;
+    for (int fj = (int)floorf((cz - R) / Q); fj <= (int)floorf((cz + R) / Q); fj++)
+        for (int fi = (int)floorf((cx - R) / Q); fi <= (int)floorf((cx + R) / Q); fi++) {
+            if (s_featN >= 12) return;
+            uint32_t hj = hash32((uint32_t)fi * 0x3C6EF372u ^ (uint32_t)fj * 0xA54FF53Au ^ s_seed ^ 0xB1CEu);
+            if (hashf(hj) > 0.6f) continue;
+            float jx = fi * Q + 4.f + 12.f * ((hj >> 8) & 255) * (1.f / 255.f), jz = fj * Q + 4.f + 12.f * ((hj >> 16) & 255) * (1.f / 255.f);
+            if (bikeDist(jx, jz) > 0.9f) continue;
+            RoadHit rh;
+            if (roadNearest(jx, jz, rh, 120.f)) continue;
+            Feat f; f.kind = 3; f.x = jx; f.z = jz;
+            s_feat[s_featN++] = f;
+        }
+}
+// the exact jump less the jump as the four cells round (ix, iz) hold it: added to the blended land (and its slope)
+static void featFix(const Grid& g, float x, float z, int ix, int iz, float fx, float fz, float& h, float& dhx, float& dhz) {
+    for (int k = 0; k < s_featN; k++) {
+        const Feat& f = s_feat[k];
+        if (sq(x - f.x) + sq(z - f.z) > 16.f * 16.f) continue;
+        const float c = g.cell;
+        float ea = featH(f, ix * c, iz * c), eb = featH(f, (ix + 1) * c, iz * c), ec = featH(f, ix * c, (iz + 1) * c), ed = featH(f, (ix + 1) * c, (iz + 1) * c);
+        float e0 = ea + (eb - ea) * fx, e1 = ec + (ed - ec) * fx;
+        float ex = featH(f, x, z);
+        if (ex == 0.f && ea == 0.f && eb == 0.f && ec == 0.f && ed == 0.f) continue;
+        h += ex - (e0 + (e1 - e0) * fz);
+        const float q = 0.05f;
+        float gx = (featH(f, x + q, z) - featH(f, x - q, z)) / (2.f * q), gz = (featH(f, x, z + q) - featH(f, x, z - q)) / (2.f * q);
+        dhx += gx - ((eb - ea) * (1.f - fz) + (ed - ec) * fz) * g.inv;
+        dhz += gz - ((ec - ea) * (1.f - fx) + (ed - eb) * fx) * g.inv;
+    }
+}
+
 static void bakeCell(Grid& g, int ci, int cj) {
     float x = ci * g.cell, z = cj * g.cell;
     const Land& L = journeyLand();
     float e = g.cell * 0.5f;
     float n0 = terrainNatural(x, z), nX = terrainNatural(x + e, z), nZ = terrainNatural(x, z + e);
     float wl = terrainWaterLevel(x, z);
+    {   float ux, uz, sd = riverSd(x, z, ux, uz);                    // the river and its valley
+        if (fabsf(sd) < 80.f) {
+            const float gz = riverGorge(L);
+            n0 = riverCarve(n0, sd, wl, gz); nX = riverCarve(nX, sd + ux * e, wl, gz); nZ = riverCarve(nZ, sd + uz * e, wl, gz);
+        }
+    }
     float h = n0, hX = nX, hZ = nZ;
     float across = 600.f, along = 0.f, half = 3.4f;
     uint8_t surf = SURF_GRASS, mat = L.ground;
@@ -1078,6 +1362,32 @@ static void bakeCell(Grid& g, int ci, int cj) {
     // dreamt (this cache or the other) takes that water's level, whatever the land under it does (the land's base
     // tilts as the journey goes; the water doesn't). Where the ground is below that level but isn't lake, or a road
     // is, the land rises to just above the water: the level never moves, the land does.
+    bool trail = false;                                           // a trail's bare dirt (no trees)
+    uint8_t lineTrees = 0;                                        // beside a singletrack: trees close along it
+    if ((!road || fabsf(across) > half + 15.f) && !underDeck && !lot && &g == &s_near && trailLand(L)) {   // (a trail ends 15 m off a road)
+        const float td = trailDist(x, z);
+        if (td < 7.f) {                                           // an off-road trail, its jumps and ramps
+            if (td < 2.6f) trail = true;
+            h += jumpAt(x, z); hX += jumpAt(x + e, z); hZ += jumpAt(x, z + e);
+            int li0 = (int)floorf(x * (1.f / RAMP_LATTICE)), lj0 = (int)floorf(z * (1.f / RAMP_LATTICE));
+            for (int dj = -1; dj <= 1; dj++) for (int di = -1; di <= 1; di++) {
+                Ramp rp; float jx, jz;
+                if (trailJump(li0 + di, lj0 + dj, jx, jz, &rp) != 2 || sq(x - rp.x) + sq(z - rp.z) > 14.f * 14.f) continue;
+                if (!terrainRamp(li0 + di, lj0 + dj, rp, true)) continue;
+                float k = rampAt(x, z, rp), kX = rampAt(x + e, z, rp), kZ = rampAt(x, z + e, rp);
+                if (k > 0.f || kX > 0.f || kZ > 0.f) { h += k; hX += kX; hZ += kZ; trail = true; }
+            }
+        } else {
+            const float bd = bikeDist(x, z);
+            if (bd < 4.6f) {                                      // singletrack, way out (no road within 120 m)
+                RoadHit r2;
+                if (!roadNearest(x, z, r2, 120.f)) {
+                    if (bd < 1.35f) trail = true; else lineTrees = 1;
+                    h += bikeJumpAt(x, z); hX += bikeJumpAt(x + e, z); hZ += bikeJumpAt(x, z + e);
+                }
+            }
+        }
+    }
     const bool canWater = mat != MAT_ROAD && mat != MAT_SHOULDER && !lot;
     float lev = wl; bool known = false;
     for (int q = 0; q < 4; q++) {
@@ -1106,6 +1416,7 @@ static void bakeCell(Grid& g, int ci, int cj) {
     float nx = -(hX - h) / e, nz = -(hZ - h) / e;
     float inv = 1.f / sqrtf(nx * nx + 1.f + nz * nz);
     nx *= inv; nz *= inv; float ny = inv;
+    uint8_t crop = 0;
     if (mat != MAT_ROAD && mat != MAT_SHOULDER && mat != MAT_WATER && !lot) {
         float p = vnoise2(x * 0.06f, z * 0.06f, s_seed + 0xD1);
         float base = journeyBase(x, z);
@@ -1114,6 +1425,13 @@ static void bakeCell(Grid& g, int ci, int cj) {
         else if (L.ground == MAT_SAND) { mat = p > 0.66f ? MAT_SOIL : MAT_SAND; }
         else if (L.ground == MAT_SNOW) { mat = p > 0.8f ? MAT_ROCK : MAT_SNOW; }
         else { mat = p > 0.70f ? (L.water > 0.7f ? MAT_MUD : MAT_SOIL) : MAT_GRASS; }
+        if (trail && mat != MAT_SNOW && mat != MAT_ROCK) mat = MAT_SOIL;   // the trail: bare dirt
+        else if ((mat == MAT_GRASS || mat == MAT_SOIL) && ny > 0.95f && fabsf(across) > half + 6.f && !underDeck) {
+            crop = cropAt(x, z);
+            if (crop && (crop & 0x60) != 0x60) mat = MAT_SOIL;           // tilled ground (pasture stays grass)
+        }
+        if (mat == MAT_ROCK && &g == &s_near && ny < 0.6f && !underDeck && fallAt(ci, cj, L)) crop = 0x80;   // a waterfall's lip
+        if (trail && !crop) crop = 0x40;                                // (below: no trees on the trail)
         static const uint8_t TYRE[] = {SURF_GRASS, SURF_DIRT, SURF_ROCK, SURF_SNOW, SURF_SAND, SURF_MUD};
         surf = TYRE[mat];
     }
@@ -1125,9 +1443,10 @@ static void bakeCell(Grid& g, int ci, int cj) {
     c.along = (uint8_t)al;
     c.mat = (uint8_t)((surf << 4) | mat);
     c.nrm = mat == MAT_WATER ? encN(0.f, 0.f) : encN(nx, nz);
-    if (mat == MAT_ROAD || mat == MAT_SHOULDER) c.extra = (uint8_t)clampf(half * 20.f, 0.f, 255.f);
+    if (mat == MAT_ROAD || mat == MAT_SHOULDER) c.extra = (uint8_t)((uint8_t)clampf(half * 20.f, 0.f, 127.f) | (road && (rh.flags & RN_TUNNEL) ? 0x80 : 0));   // bit 7: in a tunnel
     else if (mat == MAT_WATER) c.extra = (uint8_t)clampf(depth * 20.f, 0.f, 255.f);
-    else if (&g == &s_near) c.extra = underDeck ? 0 : pickVeg(x, z, ci, cj, mat, fabsf(across), half);   // nothing grows through a deck
+    else if (crop) c.extra = crop & 0x80 ? crop : 0;               // a field or pasture (near and far), a waterfall's lip, a trail: no trees
+    else if (&g == &s_near) c.extra = underDeck ? 0 : (lineTrees && mat != MAT_WATER ? lineVeg(ci, cj, L) : pickVeg(x, z, ci, cj, mat, fabsf(across), half));   // nothing grows through a deck
     else {                                                        // far: forest canopy height in metres
         float cl = vnoise2(x * 0.011f, z * 0.011f, s_seed + 0x5E);
         float dens = (L.pine + L.broad + L.redwood * 1.5f) * smooth01((cl - 0.22f) * 2.2f);
@@ -1151,6 +1470,9 @@ static void bakeCell(Grid& g, int ci, int cj) {
 #ifdef DEBUG_BAKE
     if (&g == &s_near) { int k = gridWrap(cj, g.N) * g.N + gridWrap(ci, g.N); g_dbgRoadY[k] = road ? rh.y : -999.f; g_dbgWhen[k] = g_dbgFrame; g_dbgHit[k] = road ? (rh.arm ? 1000 + rh.idx : rh.idx) : -1; }
 #endif
+    {   const float cr = cropRaise(c);                             // corn and grain stand above the ground (drawn; the
+        if (cr > 0.f) { hs += cr; c.h = (int16_t)clampf(hs * 10.f, -32000.f, 32000.f); }   // wheels go down to the soil)
+    }
     if (hs > g.maxH) g.maxH = hs;
     shadowCell(g, ci, cj);
 }
@@ -1264,6 +1586,7 @@ static void windowCentres(float x, float z, float& nx, float& nz, float& fx, flo
 }
 
 void terrainRebuild() {
+    s_featX = s_featZ = 1e9f;                                     // (the jumps near the car: found again)
     float nx, nz, fx, fz;
     float x = 0.f, z = 0.f;
     if (s_cnt > 0) { x = nodeAt(s_carIdx).x; z = nodeAt(s_carIdx).z; }
@@ -1278,6 +1601,7 @@ static void deckClear();
 void terrainInit(uint32_t seed) {
     s_seed = seed ? seed : 1;
     s_noCar = true;
+    s_featN = 0; s_featX = s_featZ = 1e9f;
     // everything a world carries, from scratch (the game inits once; the host tests init many worlds in a row)
     s_juncEvent = false; s_juncTookArm = false; s_storeReq = false; s_carDir = 1; s_carRoadDist = 0.f;
     memset(&s_gA, 0, sizeof(s_gA)); s_armMarks = false; deckClear(); s_frame = 0;
@@ -1314,6 +1638,7 @@ static void deckFind();
 void terrainUpdate(float carX, float carZ, float carYaw, float speed, float dt) {
     s_frame++;
     s_carX = carX; s_carZ = carZ; s_noCar = false;
+    featRefresh(carX, carZ);
     // the cache windows look ahead along a lagged heading (a donut doesn't thrash them)
     float k = clampf(dt * (0.25f + fabsf(speed) * 0.03f), 0.f, 1.f);
     s_lagYaw += wrapPi(carYaw - s_lagYaw) * k;
@@ -1404,12 +1729,13 @@ void terrainGround(float x, float z, Ground& o) {
         int x0 = gridWrap(ix, N), x1 = gridWrap(ix + 1, N), z0 = gridWrap(iz, N) * N, z1 = gridWrap(iz + 1, N) * N;
         const Cell &a = g.c[z0 + x0], &b = g.c[z0 + x1], &c = g.c[z1 + x0], &d = g.c[z1 + x1];
         // the ground under a water cell is its bed: the cell stores the surface (for drawing) and the depth
-        auto ground = [](const Cell& k) { return k.h * 0.1f - ((k.mat & 15) == MAT_WATER ? k.extra * 0.05f : 0.f); };
+        auto ground = [](const Cell& k) { return k.h * 0.1f - ((k.mat & 15) == MAT_WATER ? k.extra * 0.05f : 0.f) - cropRaise(k); };
         float ha = ground(a), hb = ground(b), hc = ground(c), hd = ground(d);
         float h0 = ha + (hb - ha) * fx, h1 = hc + (hd - hc) * fx;
         o.h = h0 + (h1 - h0) * fz;
         float dhx = ((hb - ha) * (1.f - fz) + (hd - hc) * fz) * g.inv;
         float dhz = ((hc - ha) * (1.f - fx) + (hd - hb) * fx) * g.inv;
+        if (s_featN && gp == &s_near) featFix(g, x, z, ix, iz, fx, fz, o.h, dhx, dhz);   // the jumps, sharp
         float inv = 1.f / sqrtf(dhx * dhx + 1.f + dhz * dhz);
         o.nx = -dhx * inv; o.ny = inv; o.nz = -dhz * inv;
         float aa = a.across * 0.02f, ab = b.across * 0.02f, ac = c.across * 0.02f, ad = d.across * 0.02f;
@@ -1417,7 +1743,7 @@ void terrainGround(float x, float z, Ground& o) {
         o.across = a0 + (a1 - a0) * fz;
         const Cell& n = (fx < 0.5f) ? (fz < 0.5f ? a : c) : (fz < 0.5f ? b : d);
         o.mat = n.mat & 15; o.surf = n.mat >> 4;
-        o.half = (o.mat == MAT_ROAD || o.mat == MAT_SHOULDER) ? n.extra * 0.05f : 3.4f;
+        o.half = (o.mat == MAT_ROAD || o.mat == MAT_SHOULDER) ? (n.extra & 0x7F) * 0.05f : 3.4f;
         // the water's depth here: the lake's level (one flat level per lake) over the blended bed, so it never jumps
         // from cell to cell at a shoreline
         o.water = o.mat == MAT_WATER ? fmaxf(0.f, n.h * 0.1f - o.h) : 0.f;
@@ -1428,6 +1754,7 @@ void terrainGround(float x, float z, Ground& o) {
     }
     // outside both caches: compute directly (rare: teleports, tests)
     float n0 = terrainNatural(x, z);
+    {   float ux, uz, sd = riverSd(x, z, ux, uz); n0 = riverCarve(n0, sd, terrainWaterLevel(x, z), riverGorge(journeyLand())); }
     o.h = n0; o.nx = 0.f; o.ny = 1.f; o.nz = 0.f; o.across = 600.f; o.along = 0.f; o.half = 3.4f;
     o.mat = journeyLand().ground; o.surf = SURF_GRASS; o.water = 0.f; o.cached = false;
     RoadHit rh;
@@ -1468,7 +1795,9 @@ static bool deckRun(bool arm, int c, int n) {
         if (d < bD) { bD = d; bLo = i0; bHi = j; }
         i = j;
     }
-    if (bLo >= 0 && bHi > bLo) { s_deck.on = true; s_deck.arm = arm; s_deck.lo = bLo; s_deck.hi = bHi; return true; }
+    if (bLo >= 0 && bHi > bLo) {                                  // with the approach slab at each end (drawn too)
+        s_deck.on = true; s_deck.arm = arm; s_deck.lo = bLo > 0 ? bLo - 1 : 0; s_deck.hi = bHi + 1 < n ? bHi + 1 : n - 1; return true;
+    }
     return false;
 }
 static bool deckAt(float x, float z, float& y, float& gx, float& gz, float& across, float& half, uint8_t& surf) {

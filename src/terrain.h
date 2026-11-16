@@ -21,9 +21,11 @@ struct RoadNode {
 enum : uint8_t { RN_CREST = 1, RN_JUNCTION = 2, RN_STORE = 4, RN_SIGN = 8,
                  RN_BRIDGE = 16,       // a trestle deck: the road rides on timber here, the land under it is left alone
                  RN_XING = 32,         // the newer road through a level crossing: the older road's surface wins inside its width
-                 RN_CAUTION = 64 };    // a yellow caution triangle stands beside this node (side: RN_SIDE_*)
-// RoadNode::side: bits 0-1 the dealership's side (1 right, 2 left); bits 2-3 the caution sign's side (front frame)
-enum : uint8_t { RN_SIDE_CAUTION_R = 4, RN_SIDE_CAUTION_L = 8 };
+                 RN_CAUTION = 64,      // a yellow caution triangle stands beside this node (side: RN_SIDE_*)
+                 RN_TUNNEL = 128 };    // the road runs through a ridge here: a tunnel (its cells' extra bit 7)
+// RoadNode::side: bits 0-1 the dealership's side (1 right, 2 left); bits 2-3 the caution sign's side (front frame);
+// bit 4 a river bridge
+enum : uint8_t { RN_SIDE_CAUTION_R = 4, RN_SIDE_CAUTION_L = 8, RN_SIDE_RIVER = 16 };   // RIVER: a bridge over a big river
 
 struct Junction {
     bool active;
@@ -49,6 +51,19 @@ struct Cell {
     uint8_t nrm;      // normal: high nibble x, low nibble z, (v - 8) / 8
     uint8_t extra;    // road / shoulder: half-width 1/20 m.  water: depth 1/20 m.  ground: vegetation hint
 };
+
+// Farm plots (56 m squares): 0 not farmed, else the code a plot's cells keep in Cell::extra (bit 7 farmed, bits 5-6
+// 0 corn 1 potatoes 2 grain 3 pasture, bit 4 the rows' heading). Near rock cells with extra 0x80: a waterfall's lip.
+constexpr float PLOT_M = 56.f;
+uint8_t terrainPlot(int pi, int pj);
+uint8_t terrainNearExtra(float x, float z);
+// Launch ramps (on the off-road trails): at most one in each 32 m lattice cell. (x, z) the lip's centre, (ux, uz) the
+// way you drive up it.
+constexpr float RAMP_LATTICE = 32.f;
+struct Ramp { float x, z, ux, uz; };
+bool terrainRamp(int li, int lj, Ramp& r, bool checkRoad = true);
+float terrainRiverDepth(float x, float z);   // how far a big river's valley is carved below the land here (0: none)
+float terrainRiverDist(float x, float z);    // distance to the nearest big river's centre line (large: none near)       // a near ground cell's extra (0 off the window, water or road)
 
 struct Grid {
     Cell* c; int N; float cell, inv;

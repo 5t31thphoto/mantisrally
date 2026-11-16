@@ -84,6 +84,7 @@ const Land& journeyLand();
 // The base-elevation plane: coherent in every direction, tilting so the land climbs or falls toward each
 // biome's base as you travel (the Pikes Peak climb, the drop to the coast).
 float journeyBase(float x, float z);
+float journeyTilt();                 // how steeply the base plane leans now (0 once a biome has settled)
 void  journeySetCar(float x, float z, float yaw, float dist);
 
 }

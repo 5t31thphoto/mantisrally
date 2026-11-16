@@ -265,6 +265,7 @@ void journeyForce(uint8_t cur, uint8_t next, float blend) {
 
 // ---- base plane ----
 float journeyBase(float x, float z) { return s_b0 + s_gx * (x - s_ax) + s_gz * (z - s_az); }
+float journeyTilt() { return sqrtf(s_gx * s_gx + s_gz * s_gz); }
 
 void journeySetCar(float x, float z, float yaw, float dist) {
     float here = journeyBase(x, z);
